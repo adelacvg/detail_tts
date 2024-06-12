@@ -1,0 +1,44 @@
+{
+  "train": {
+    "train_steps":1000000,
+    "val_freq" : 100,
+    "save_freq" : 1000,
+    "keep_ckpts" : 3,
+    "lr":1e-4,
+    "logs_folder":"ttts/gpt/logs",
+    "text_weight":0.01,
+    "mel_weight":1,
+    "accumulate_num":1
+  },
+  "dataset": {
+    "path":"/home/hyc/tortoise_plus_zh/ttts/datasets/44k_data.jsonl"
+  },
+  "gpt":{
+    "model_dim":512,
+    "max_mel_tokens":1600,
+    "max_text_tokens":800,
+    "heads":8,
+    "mel_length_compression":2048,
+    "use_mel_codes_as_input":true,
+    "layers":12,
+    "number_text_tokens":256,
+    "number_mel_codes":1026,
+    "start_mel_token":1024,
+    "stop_mel_token":1025,
+    "start_text_token":255,
+    "train_solo_embeddings":false,
+    "spec_channels":128
+  },
+  "dataloader":
+  {
+    "batch_size" : 32,
+    "shuffle": true,
+    "num_workers" : 16,
+    "drop_last":true,
+    "pin_memory":true
+  },
+  "comment":{
+    "sampler":"sampler", 
+    "collate_fn":"collate_fn"
+  }
+}
