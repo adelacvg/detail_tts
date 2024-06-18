@@ -1,4 +1,9 @@
 from vqvae.model_vc import SynthesizerTrn
+import os
+import json
+from vqvae.utils.data_utils import HParams
+import torch
+from gpt.model import UnifiedVoice
 
 def load_model(model_name, model_path, config_path, device):
     config_path = os.path.expanduser(config_path)
@@ -12,8 +17,7 @@ def load_model(model_name, model_path, config_path, device):
         model = SynthesizerTrn(
             hps.data.filter_length // 2 + 1,
             hps.train.segment_size // hps.data.hop_length,
-            **hps.vqvae,
-        )
+            **hps.model)
         vqvae = torch.load(model_path, map_location=device)
         if 'model' in vqvae:
             sd = vqvae['model']

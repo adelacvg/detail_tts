@@ -4,9 +4,9 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-import modules.commons as commons
-from modules.DSConv import weight_norm_modules
-from modules.modules import LayerNorm
+import vqvae.modules.commons as commons
+from vqvae.modules.DSConv import weight_norm_modules
+from vqvae.modules.modules import LayerNorm
 
 
 class FFT(nn.Module):

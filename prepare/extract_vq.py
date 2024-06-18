@@ -8,13 +8,13 @@ import json
 from vqvae.utils.data_utils import spectrogram_torch,HParams
 import random
 
-model_path = '/home/hyc/tortoise_plus_zh/ttts/vqvae/logs/v2/G_128163.pth'
+model_path = '/home/hyc/detail_tts/vqvae/logs/2024-06-14-17-43-57/model-159.pt'
 # device_ids = [4,5,6,7]
 # rank = random.choice(device_ids)
 # device = f'cuda:{rank}'
 device = 'cuda'
-vqvae = load_model('vqvae', model_path, 'ttts/vqvae/config.json', device)
-hps = HParams(**json.load(open('ttts/vqvae/config.json')))
+vqvae = load_model('vqvae', model_path, 'vqvae/configs/config.json', device)
+hps = HParams(**json.load(open('vqvae/configs/config.json')))
 def process_vq(path):
     wav_path = path
     try:
@@ -32,9 +32,9 @@ def process_vq(path):
     try:
         with torch.no_grad():
             spec = spectrogram_torch(wav, hps.data.filter_length,
-                    hps.data.hop_length, hps.data.win_length, center=False)
-            spec_lengths = spec.shape[-1].unsqueeze(0)
-            code = vqvae.extract_code(spec,spec_lengths).squeeze(0).squeeze(0)
+                    hps.data.hop_length, hps.data.win_length, center=False).to(device)
+            spec_lengths = torch.LongTensor([spec.shape[-1]]).to(device)
+            code = vqvae.encode(spec,spec_lengths).squeeze(0).squeeze(0)
     except Exception as e:
         print(path)
         print(e)

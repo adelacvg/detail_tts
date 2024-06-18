@@ -9,7 +9,7 @@ from tqdm import tqdm
 import torchaudio
 from pypinyin import Style, lazy_pinyin
 
-from ttts.gpt.voice_tokenizer import VoiceBpeTokenizer
+from bpe_tokenizers.voice_tokenizer import VoiceBpeTokenizer
 import json
 import os
 from pathlib import Path
@@ -30,93 +30,44 @@ def write_jsonl(path, all_paths):
 
 class GptTtsDataset(torch.utils.data.Dataset):
     def __init__(self, opt):
-        self.tok = VoiceBpeTokenizer('ttts/gpt/gpt_tts_tokenizer.json')
+        self.tok = VoiceBpeTokenizer('bpe_tokenizers/zh_tokenizer.json')
         self.jsonl_path = opt['dataset']['path']
         self.audiopaths_and_text = read_jsonl(self.jsonl_path)
         self.audiopaths_and_text = sorted(self.audiopaths_and_text,
                 key=lambda x: x['path'])
     def get_text_and_vq(self, audiopath_and_text):
-        audiopath, text = audiopath_and_text['path'], audiopath_and_text['text']
+        audiopath, text = audiopath_and_text['path'][5:], audiopath_and_text['text']
         text = ' '.join(lazy_pinyin(text, style=Style.TONE3, neutral_tone_with_five=True))
         text = ' '+text+' '
         text = self.tok.encode(text)
         text = LongTensor(text)
         # Fetch quantized MELs
-        quant_path = audiopath + '.dur.pth'
+        quant_path = audiopath + '.vq.pth'
         vq = LongTensor(torch.load(quant_path))
-        return text, vq
-    def get_wav_len(self, path):
-        wav,sr = torchaudio.load(audiopath)
-        wav = torchaudio.functional.resample(wav, sr, 32000)
-        wav_length = wav.shape[-1]
-        return wav_length
+        spec_path = audiopath + '.spec.pth'
+        spec = torch.load(spec_path).detach().squeeze(0)
+        return text, vq, spec
     def is_same_spk(self, path1, path2):
         name1 = Path(path1).parent.name
         name2 = Path(path2).parent.name
-        if name1[:3]=='SSB' and name2[:3]=='SSB':
-            if name1[:7]==name2[:7]:
-                return True
-        elif name1[:2]=='vo' and name2[:2]=='vo':
-            if name1.split('_')[-2] == name2.split('_')[-2] or \
-            name1.split('_')[-3] == name2.split('_')[-3]:
-                return True
-        else:
-            if name1 == name2:
-                return True
+        if name1 == name2:
+            return True
         return False
     def __getitem__(self, index):
+        squeeze_scale = 2048
         try:
             # Fetch text and add start/stop tokens.
             audiopath_and_text = self.audiopaths_and_text[index]
-            text, vq = self.get_text_and_vq(audiopath_and_text)
+            text, vq, spec = self.get_text_and_vq(audiopath_and_text)
             pths = self.audiopaths_and_text
-            l = self.__len__()
-            text_prepre, vq_prepre, prepre_wav_len = None,None,None
-            text_postpost, vq_postpost, postpost_wav_len = None,None,None
-            text_pre, vq_pre, pre_wav_len = None, None, None
-            text_post, vq_post, post_wav_len = None, None, None
-            prepre_ind = random.randint(2, 9)
-            if self.is_same_spk(pths[(index-prepre_ind+l)%l]['path'], audiopath_and_text['path']):
-                text_prepre, vq_prepre = self.get_text_and_vq(pths[(index-prepre_ind+l)%l])
-                vq_prepre = vq_prepre[1:-1]
-                prepre_wav_len = vq_prepre.shape[-1]*1280
-            if self.is_same_spk(pths[(index-1+l)%l]['path'], audiopath_and_text['path']):
-                text_pre, vq_pre = self.get_text_and_vq(pths[(index-1+l)%l])
-                vq_pre = vq_pre[1:-1]
-                pre_wav_len = vq_pre.shape[-1]*1280
-            if self.is_same_spk(pths[(index+1+l)%l]['path'], audiopath_and_text['path']):
-                text_post, vq_post = self.get_text_and_vq(pths[(index+1+l)%l])
-                vq_post = vq_post[1:-1]
-                post_wav_len = vq_post.shape[-1]*1280
-            postpost_ind = random.randint(2, 9)
-            if self.is_same_spk(pths[(index+postpost_ind+l)%l]['path'], audiopath_and_text['path']):
-                text_postpost, vq_postpost = self.get_text_and_vq(pths[(index+postpost_ind+l)%l])
-                vq_postpost = vq_postpost[1:-1]
-                postpost_wav_len = vq_postpost.shape[-1]*1280
-            wav_length = vq.shape[-1]*1280
-            if text_pre is not None:
-                text = torch.cat((text_pre,text))
-                vq = torch.cat((vq_pre, vq))
-                wav_length = wav_length + pre_wav_len
-            if text_prepre is not None:
-                text = torch.cat((text_prepre,text))
-                vq = torch.cat((vq_prepre, vq))
-                wav_length = wav_length + prepre_wav_len
-            if text_post is not None:
-                text = torch.cat((text,text_post))
-                vq = torch.cat((vq, vq_post))
-                wav_length = wav_length + post_wav_len
-            if text_postpost is not None:
-                text = torch.cat((text,text_postpost))
-                vq = torch.cat((vq, vq_postpost))
-                wav_length = wav_length + postpost_wav_len
+            wav_length = vq.shape[-1]*squeeze_scale
         except Exception as e:
             print(e)
             return None
-        if text.shape[-1]>=800 or vq.shape[-1]>=1600:
+        if text.shape[-1]>=1600 or vq.shape[-1]>=3200:
             return None 
         # load wav
-        return text, vq, wav_length
+        return text, vq, wav_length, spec
 
     def __len__(self):
         return len(self.audiopaths_and_text)
@@ -136,24 +87,31 @@ class GptTtsCollater():
         max_qmel_len = max(qmel_lens)+1
         wav_lens = [x[2] for x in batch]
         max_wav_len = max(wav_lens)
+        spec_lens = [x[3].shape[1] for x in batch]
+        max_spec_len = max(spec_lens)+1
         texts = []
         qmels = []
         wavs = []
+        specs = []
         # This is the sequential "background" tokens that are used as padding for text tokens, as specified in the DALLE paper.
         for b in batch:
-            text, qmel, wav_length = b
+            text, qmel, wav_length, spec = b
             text = F.pad(text, (0, max_text_len-len(text)), value=0)
             texts.append(text)
             qmels.append(F.pad(qmel, (0, max_qmel_len-len(qmel)), value=0))
+            specs.append(F.pad(spec,(0, max_spec_len-spec.shape[1]), value=0))
 
         padded_qmel = torch.stack(qmels)
         padded_texts = torch.stack(texts)
+        padded_spec = torch.stack(specs)
         return {
             'padded_text': padded_texts,
             'text_lengths': LongTensor(text_lens),
             'padded_qmel': padded_qmel,
             'qmel_lengths': LongTensor(qmel_lens),
-            'wav_lens': LongTensor(wav_lens)
+            'wav_lens': LongTensor(wav_lens),
+            'padded_spec': padded_spec,
+            'spec_lengths': LongTensor(spec_lens)
         }
 
 

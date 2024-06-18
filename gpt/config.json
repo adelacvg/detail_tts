@@ -5,13 +5,13 @@
     "save_freq" : 1000,
     "keep_ckpts" : 3,
     "lr":1e-4,
-    "logs_folder":"ttts/gpt/logs",
+    "logs_folder":"gpt/logs",
     "text_weight":0.01,
     "mel_weight":1,
     "accumulate_num":1
   },
   "dataset": {
-    "path":"/home/hyc/tortoise_plus_zh/ttts/datasets/44k_data.jsonl"
+    "path":"datasets/data_v4.jsonl"
   },
   "gpt":{
     "model_dim":512,
@@ -27,13 +27,13 @@
     "stop_mel_token":1025,
     "start_text_token":255,
     "train_solo_embeddings":false,
-    "spec_channels":128
+    "spec_channels":1025
   },
   "dataloader":
   {
     "batch_size" : 32,
     "shuffle": true,
-    "num_workers" : 16,
+    "num_workers" : 64,
     "drop_last":true,
     "pin_memory":true
   },

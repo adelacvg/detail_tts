@@ -1,16 +1,17 @@
 import torch
+import random
 from torch import nn
 from torch.nn import Conv1d, Conv2d
 from torch.nn import functional as F
 from torch.nn.utils import spectral_norm, weight_norm
 
-import modules.attentions as attentions
-import modules.commons as commons
-import modules.modules as modules
-from utils import utils
-from modules.commons import get_padding
-from modules.quantize import ResidualVectorQuantizer
-from utils.utils import f0_to_coarse
+import vqvae.modules.attentions as attentions
+import vqvae.modules.commons as commons
+import vqvae.modules.modules as modules
+from vqvae.utils import utils
+from vqvae.modules.commons import get_padding
+from vqvae.modules.quantize import ResidualVectorQuantizer
+from vqvae.utils.utils import f0_to_coarse
 
 
 class ResidualCouplingBlock(nn.Module):
@@ -426,8 +427,7 @@ class SynthesizerTrn(nn.Module):
         self.enc_p = []
         self.enc_p.extend(
             [
-                SpecEncoder(
-                    inter_channels, hidden_channels, filter_channels, False, n_heads,
+                SpecEncoder( inter_channels, hidden_channels, filter_channels, False, n_heads,
                 4, kernel_size, p_dropout,gin_channels=gin_channels),
                 SpecEncoder(
                     inter_channels, hidden_channels, filter_channels, True, n_heads,
@@ -459,7 +459,7 @@ class SynthesizerTrn(nn.Module):
             "use_depthwise_conv":use_depthwise_conv
         }
         
-        from vdecoder.hifigan.models import Generator
+        from vqvae.vdecoder.hifigan.models import Generator
         self.dec = Generator(h=hps)
 
         self.enc_q = Encoder(spec_channels, inter_channels, hidden_channels, 5, 1, 16, gin_channels=gin_channels)
@@ -491,16 +491,6 @@ class SynthesizerTrn(nn.Module):
             p_dropout,
             gin_channels = gin_channels,
         )
-        self.refer_feature_enc = SpecEncoder(
-            inter_channels,
-            hidden_channels,
-            filter_channels,
-            False,
-            n_heads,
-            4,
-            kernel_size,
-            p_dropout,
-        )
         self.detail_enc = SpecEncoder(
             inter_channels,
             hidden_channels,
@@ -518,7 +508,7 @@ class SynthesizerTrn(nn.Module):
             filter_channels,
             False,
             n_heads,
-            8,
+            6,
             kernel_size,
             p_dropout,
             gin_channels = gin_channels,
@@ -526,44 +516,56 @@ class SynthesizerTrn(nn.Module):
         self.ssl_proj = nn.ModuleList([
             modules.WN(hidden_channels, 5, 1, 16, gin_channels=gin_channels),
             nn.Conv1d(hidden_channels, hidden_channels, 3, 2, 1),
-            SpecEncoder(inter_channels, hidden_channels, filter_channels, False, n_heads, 3, kernel_size,
-            p_dropout,gin_channels = gin_channels),
+            SpecEncoder(inter_channels, hidden_channels, filter_channels, False, n_heads, 3, kernel_size, p_dropout,gin_channels = gin_channels),
             nn.Conv1d(inter_channels, inter_channels, 3, 2, 1),
+            SpecEncoder(inter_channels, hidden_channels, filter_channels, False, n_heads, 3, kernel_size, p_dropout,gin_channels = gin_channels),
             nn.ConvTranspose1d(inter_channels, inter_channels, 3, 2, 1,output_padding=1),
-            SpecEncoder(inter_channels, hidden_channels, filter_channels, False, n_heads, 3, kernel_size,
-            p_dropout,gin_channels = gin_channels),
-            nn.ConvTranspose1d(inter_channels, inter_channels, 3, 2, 1,output_padding=1)]
+            SpecEncoder(inter_channels, hidden_channels, filter_channels, False, n_heads, 3, kernel_size, p_dropout,gin_channels = gin_channels),
+            nn.ConvTranspose1d(inter_channels, inter_channels, 3, 2, 1,output_padding=1),
+            SpecEncoder(inter_channels, hidden_channels, filter_channels, True, n_heads, 3, kernel_size, p_dropout,gin_channels = gin_channels),]
             )
         self.quantizer = ResidualVectorQuantizer(dimension=hidden_channels, n_q=8, bins=1024)
         self.f0_prenet = nn.Conv1d(1, hidden_channels, 3, padding=1)
         self.code_emb = nn.Embedding(1024, hidden_channels)
         nn.init.normal_(self.code_emb.weight, 0.0, hidden_channels**-0.5)
 
+        # self.quantizer.requires_grad_(False)
+
     def forward(self, spec, spec_lengths, f0, uv):
         quantized_mask = torch.unsqueeze(commons.sequence_mask(spec_lengths//4, spec.size(2)//4), 1).to(spec.dtype)
         spec_mask = torch.unsqueeze(commons.sequence_mask(spec_lengths, spec.size(2)), 1).to(spec.dtype)
+        half_mask = torch.unsqueeze(commons.sequence_mask(spec_lengths//2, spec.size(2)//2), 1).to(spec.dtype)
         x_mask = spec_mask
         g = self.ref_enc(spec,spec_mask)
 
         commit_loss=0
         # ssl prenet
         x = self.pre(spec) * x_mask
-        x = self.ssl_proj[0](x,spec_mask,g)
-        x = self.ssl_proj[1](x)
-        x = self.ssl_proj[2](x,spec_lengths//2,g)
-        x = self.ssl_proj[3](x)
+        x1 = self.ssl_proj[0](x,spec_mask,g)
+        x2 = self.ssl_proj[1](x1)
+        x3 = self.ssl_proj[2](x2,spec_lengths//2,g)
+        x4 = self.ssl_proj[3](x3)
+        x5 = self.ssl_proj[4](x4,spec_lengths//4,g)
         l_quantized_detail = 0
-        quantized = x
-        quantized, codes, commit_loss, quantized_list = self.quantizer(x, layers=[0,1,2,3,4,5,6,7])
+        quantized, codes, commit_loss, quantized_list = self.quantizer(x5, layers=[0,1,2,3,4,5,6,7])
+
         base = self.code_emb(codes[0]).transpose(1,2)
-        noise = (sum(quantized_list[:8]).detach()//8).detach()
-        quantized_detail = [base+noise*i for i in range(8)]
-        for i in range(8):
-            quantized_detail_ = self.quantized_detail_enc(quantized_detail[i],spec_lengths//4,g=g)
-            l_quantized_detail += torch.sum(((noise - quantized_detail_)**2)*quantized_mask) / torch.sum(quantized_mask)
-        x = self.ssl_proj[4](quantized)
-        x = self.ssl_proj[5](x,spec_lengths//2,g)
-        x = self.ssl_proj[6](x)
+        noise = ((x5.detach()-base)//100).detach()
+        # f = random.randint(0,2)
+        # if f==0:
+        #     i = 0
+        # else:
+        i = random.randint(0,100)
+        quantized_detail = base+noise*i+torch.randn_like(base)*0.005
+        quantized_detail_ = self.quantized_detail_enc(quantized_detail, spec_lengths//4, g=g)
+        l_quantized_detail += torch.sum(((noise - quantized_detail_)**2)*quantized_mask) / torch.sum(quantized_mask)
+        x6 = self.ssl_proj[5](x5)
+        x7 = self.ssl_proj[6](x6,spec_lengths//2,g)
+        x8 = self.ssl_proj[7](x7)
+        x9 = self.ssl_proj[8](x8,spec_lengths,g)
+        x = x9
+
+        l_residual_detail = 0
         
         # f0 predict
         lf0 = 2595. * torch.log10(1. + f0.unsqueeze(1) / 700.) / 500
@@ -581,8 +583,7 @@ class SynthesizerTrn(nn.Module):
         detail_ = self.detail_enc(x, spec_lengths, g=g)
         l_detail = torch.sum(((detail - detail_) ** 2)*spec_mask) / torch.sum(spec_mask)
         x = x + detail
-        refer_feature = self.refer_feature_enc(spec2, spec_lengths)
-        x, m_p, logs_p = self.enc_p[1](x, spec_lengths,g=g, refer=refer_feature,refer_lengths=spec_lengths)
+        x, m_p, logs_p = self.enc_p[1](x, spec_lengths, g=g)
         latent = x
 
         z, m_q, logs_q, spec_mask = self.enc_q(spec, spec_lengths, g=g)
@@ -594,7 +595,7 @@ class SynthesizerTrn(nn.Module):
         # nsf decoder
         o = self.dec(z_slice, g=g, f0=pitch_slice)
 
-        return o, ids_slice, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q, m_t, logs_t), pred_lf0, lf0, l_detail, l_f0_detail, latent, commit_loss, l_quantized_detail
+        return o, ids_slice, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q, m_t, logs_t), pred_lf0, lf0, l_detail, l_f0_detail, latent, commit_loss, l_quantized_detail, l_residual_detail
 
     @torch.no_grad()
     def infer(self, c, c_lengths, refer, refer_lengths, f0=None, noice_scale=0.35, predict_f0=True):
@@ -607,20 +608,26 @@ class SynthesizerTrn(nn.Module):
         
         x_mask = torch.unsqueeze(commons.sequence_mask(c_lengths, c.size(2)), 1).to(c.dtype)
         x = self.pre(c) * x_mask
-        x = self.ssl_proj[0](x,c_mask,g)
-        x = self.ssl_proj[1](x)
-        x = self.ssl_proj[2](x,c_lengths//2,g)
-        x = self.ssl_proj[3](x)
-        quantized = x
-        quantized, codes, commit_loss, quantized_list = self.quantizer(x, layers=[0,1,2,3,4,5,6,7])
+        x1 = self.ssl_proj[0](x,c_mask,g)
+        x2 = self.ssl_proj[1](x1)
+        x3 = self.ssl_proj[2](x2,c_lengths//2,g)
+        x4 = self.ssl_proj[3](x3)
+        x5 = self.ssl_proj[4](x4,c_lengths//4,g)
+        quantized = x5
+        quantized, codes, commit_loss, quantized_list = self.quantizer(x5, layers=[0,1,2,3,4,5,6,7])
         quantized_ = self.code_emb(codes[0]).transpose(1,2)
-        for i in range(8):
+        for i in range(10):
             noise = self.quantized_detail_enc(quantized_,c_lengths//4,g=g)
-            quantized_ = quantized + noise
+            quantized_ = quantized_ + noise
+        for i in range(18):
+            noise = self.quantized_detail_enc(quantized_,c_lengths//4,g=g)
+            quantized_ = quantized_ + noise*5
         quantized = quantized_
-        x = self.ssl_proj[4](quantized)
-        x = self.ssl_proj[5](x,c_lengths//2,g)
-        x = self.ssl_proj[6](x)
+        x6 = self.ssl_proj[5](quantized)
+        x7 = self.ssl_proj[6](x6,c_lengths//2,g)
+        x8 = self.ssl_proj[7](x7)
+        x9 = self.ssl_proj[8](x8,c_lengths,g)
+        x = x9
         
         f0_detail = self.f0_detail_enc(x.detach(), c_lengths, g=g)
         pred_lf0 = self.f0_decoder(x, f0_detail, x_mask, spk_emb=g)
@@ -629,9 +636,7 @@ class SynthesizerTrn(nn.Module):
         x, m_t, logs_t, _ = self.enc_text(x, x_mask, f0=f0_to_coarse(f0))
         detail = self.detail_enc(x, c_lengths, g=g)
         x = x + detail
-        spec = self.spec_proj(refer)*refer_mask
-        refer_feature = self.refer_feature_enc(spec, refer_lengths)
-        z_p, m_p, logs_p = self.enc_p[1](x, c_lengths,g=g, refer=refer_feature,refer_lengths=refer_lengths)
+        z_p, m_p, logs_p = self.enc_p[1](x, c_lengths,g=g)
 
         z = (m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noice_scale) * x_mask
         z = self.flow(z, c_mask, g=g, reverse=True)
@@ -642,25 +647,34 @@ class SynthesizerTrn(nn.Module):
         spec_mask = torch.unsqueeze(commons.sequence_mask(spec_lengths, spec.size(2)), 1).to(spec.dtype)
         g = self.ref_enc(spec, spec_mask)
         x = self.pre(spec) * spec_mask
-        x = self.ssl_proj[0](x,spec_mask,g)
-        x = self.ssl_proj[1](x)
-        x = self.ssl_proj[2](x,spec_lengths//2,g)
-        x = self.ssl_proj[3](x)
-        quantized = x
-        quantized, codes, commit_loss, quantized_list = self.quantizer(x, layers=[0,1,2,3,4,5,6,7])
+        x1 = self.ssl_proj[0](x,spec_mask,g)
+        x2 = self.ssl_proj[1](x1)
+        x3 = self.ssl_proj[2](x2,spec_lengths//2,g)
+        x4 = self.ssl_proj[3](x3)
+        x5 = self.ssl_proj[4](x4,spec_lengths//4,g)
+        quantized, codes, commit_loss, quantized_list = self.quantizer(x5, layers=[0,1,2,3,4,5,6,7])
         return codes[0]
-    def decode(code, c_lengths, refer, refer_lengths):
+    def decode(self, code, c_lengths, refer, refer_lengths, noice_scale=0.35):
         refer_mask = torch.unsqueeze(
             commons.sequence_mask(refer_lengths, refer.size(2)), 1).to(refer.dtype)
+        c_mask = torch.unsqueeze(
+            commons.sequence_mask(c_lengths*4, code.size(1)*4), 1).to(refer.dtype)
+        x_mask=c_mask
         g = self.ref_enc(refer, refer_mask)
+        
         quantized_ = self.code_emb(code).transpose(1,2)
-        for i in range(8):
+        for i in range(10):
             noise = self.quantized_detail_enc(quantized_,c_lengths//4,g=g)
-            quantized_ = quantized + noise
+            quantized_ = quantized_ + noise
+        for i in range(18):
+            noise = self.quantized_detail_enc(quantized_,c_lengths//4,g=g)
+            quantized_ = quantized_ + noise*5
         quantized = quantized_
-        x = self.ssl_proj[4](quantized)
-        x = self.ssl_proj[5](x,c_lengths//2,g)
-        x = self.ssl_proj[6](x)
+        x6 = self.ssl_proj[5](quantized)
+        x7 = self.ssl_proj[6](x6,c_lengths//2,g)
+        x8 = self.ssl_proj[7](x7)
+        x9 = self.ssl_proj[8](x8,c_lengths,g)
+        x = x9
         
         f0_detail = self.f0_detail_enc(x.detach(), c_lengths, g=g)
         pred_lf0 = self.f0_decoder(x, f0_detail, x_mask, spk_emb=g)
@@ -669,12 +683,9 @@ class SynthesizerTrn(nn.Module):
         x, m_t, logs_t, _ = self.enc_text(x, x_mask, f0=f0_to_coarse(f0))
         detail = self.detail_enc(x, c_lengths, g=g)
         x = x + detail
-        spec = self.spec_proj(refer)*refer_mask
-        refer_feature = self.refer_feature_enc(spec, refer_lengths)
-        z_p, m_p, logs_p = self.enc_p[1](x, c_lengths,g=g, refer=refer_feature,refer_lengths=refer_lengths)
+        z_p, m_p, logs_p = self.enc_p[1](x, c_lengths,g=g)
 
         z = (m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noice_scale) * x_mask
         z = self.flow(z, c_mask, g=g, reverse=True)
         o = self.dec(z * c_mask, g=g, f0=f0)
-        return o,f0
-
+        return o

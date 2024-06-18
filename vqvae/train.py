@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.optim import AdamW
 from accelerate import Accelerator
-from model_vc import SynthesizerTrn, MultiPeriodDiscriminator
+from model_tts import SynthesizerTrn, MultiPeriodDiscriminator
 from dataset_vc import TextAudioCollate, TextAudioSpeakerLoader
 from utils.data_utils import spec_to_mel_torch, mel_spectrogram_torch, HParams, spectrogram_torch
 from utils import utils
@@ -86,7 +86,7 @@ class Trainer(object):
         self.config = hps
         dataset = TextAudioSpeakerLoader(hps.data.training_files, hps)
         collate_fn = TextAudioCollate()
-        num_workers = 5
+        num_workers = 16
         self.dataloader = DataLoader(
             dataset,
             batch_size=hps.train.batch_size,
@@ -179,10 +179,9 @@ class Trainer(object):
                     wav = y
                     # with torch.autograd.detect_anomaly():
                     with self.accelerator.autocast():
-                        y_hat, ids_slice, z_mask, \
-                        (z, z_p, m_p, logs_p, m_q, logs_q, m_t, logs_t),\
-                        pred_lf0, lf0, l_detail,\
-                        l_f0_detail, latent, commit_loss,l_quantized_detail = self.G(spec,lengths, f0, uv)
+                        y_hat, diff_loss, commit_loss, ids_slice, z_mask,\
+                        (z, z_p, m_p, logs_p, m_q, logs_q),\
+                        latent = self.G(spec, lengths)
                         mel = spec_to_mel_torch(
                             spec,
                             hps.data.filter_length,
@@ -219,28 +218,21 @@ class Trainer(object):
                     self.D_optimizer.step()
                     accelerator.wait_for_everyone()
                     
-                    unused_params =[]
-                    G_ = self.accelerator.unwrap_model(self.G)
-                    unused_params.extend(list(G_.quantized_detail_enc.parameters()))
-                    extraneous_addition = 0
-                    for p in unused_params:
-                        extraneous_addition = extraneous_addition + p.mean()
+                    # unused_params =[]
+                    # G_ = self.accelerator.unwrap_model(self.G)
+                    # unused_params.extend(list(G_.quantized_detail_enc.parameters()))
+                    # extraneous_addition = 0
+                    # for p in unused_params:
+                    #     extraneous_addition = extraneous_addition + p.mean()
                     # Generator
                     with self.accelerator.autocast():
                         y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.D(y, y_hat)
-                    loss_detail = l_detail
-                    loss_f0_detail = l_f0_detail
-                    loss_quantized_detail = l_quantized_detail
-                    loss_lf0 = F.mse_loss(pred_lf0, lf0)
                     loss_mel = F.l1_loss(y_mel, y_hat_mel) * 45
                     loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask)
-                    loss_kl_text = kl_loss(z_p, logs_q, m_t, logs_t, z_mask)
                     loss_fm = feature_loss(fmap_r, fmap_g)
                     loss_gen, losses_gen = generator_loss(y_d_hat_g)
                     loss_gen_all = loss_gen + loss_fm + loss_mel \
-                        + loss_kl + loss_kl_text + loss_lf0 \
-                        + loss_detail + loss_f0_detail + commit_loss + loss_quantized_detail\
-                        + extraneous_addition*0
+                        + loss_kl + commit_loss + diff_loss
 
                     self.G_optimizer.zero_grad()
                     self.accelerator.backward(loss_gen_all)
@@ -256,20 +248,16 @@ class Trainer(object):
                         eval_model = self.accelerator.unwrap_model(self.G)
                         eval_model.eval()
                         with torch.no_grad():
-                            wav_eval,_ = eval_model.infer(spec, lengths, spec, lengths)
+                            wav_eval = eval_model.infer(spec, lengths, spec, lengths)
                         eval_model.train()
                         scalar_dict = {
                                 "gen/loss_gen_all": loss_gen_all,
                                 "gen/loss_gen":loss_gen,
                                 'gen/loss_fm':loss_fm,
                                 'gen/loss_mel':loss_mel,
-                                'gen/loss_lf0':loss_lf0,
-                                'gen/loss_detail':loss_detail, 
-                                'gen/loss_f0_detail':loss_f0_detail,
-                                'gen/loss_quantized_detail':loss_quantized_detail,
                                 'gen/loss_kl':loss_kl, 
+                                'gen/loss_diff':diff_loss, 
                                 'gen/loss_commit':commit_loss,
-                                'gen/loss_kl_text':loss_kl_text,
                                 "norm/G_grad": grad_norm_g, 
                                 "norm/D_grad": grad_norm_d,
                                 'disc/loss_disc_all':loss_disc_all,
@@ -280,8 +268,6 @@ class Trainer(object):
                             "img/mel_pred": plot_spectrogram_to_numpy(y_hat_mel[0, :, :].detach().unsqueeze(-1).cpu().numpy()),
                             "img/mel_raw": plot_spectrogram_to_numpy(mel[0].data.cpu().numpy()),
                             "img/latent": plot_spectrogram_to_numpy(latent[0].data.cpu().numpy()),
-                            "all/lf0": utils.plot_data_to_numpy(lf0[0, 0, :].cpu().numpy(),
-                                        pred_lf0[0, 0, :].detach().cpu().numpy()),
                         }
                         audios_dict = {
                             'wav/gt':wav[0,0,:].detach().cpu(),
@@ -312,5 +298,5 @@ class Trainer(object):
 
 if __name__ == '__main__':
     trainer = Trainer(cfg_path='vqvae/configs/config.json')
-    trainer.load('/home/hyc/detail_tts/vqvae/logs/2024-06-11-13-28-48/model-69.pt')
+    trainer.load('/home/hyc/detail_tts/vqvae/logs/2024-06-18-14-12-14/model-4.pt')
     trainer.train()

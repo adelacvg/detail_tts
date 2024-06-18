@@ -27,9 +27,9 @@ def extract_vq(file_paths, max_workers):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--json_path',default='ttts/datasets/data_v4.jsonl')
+    parser.add_argument('--json_path',default='datasets/44k_data_zh.jsonl')
     args = parser.parse_args()
     paths = read_jsonl(args.json_path)
-    paths = [os.path.join('/home/hyc/tortoise_plus_zh',path['path']) for path in paths]
-    num_threads = 12
+    paths = [os.path.join('/home/hyc/detail_tts',path['path'][5:]) for path in paths]
+    num_threads = 4
     extract_vq(paths, num_threads)

@@ -5,9 +5,9 @@ import json
 from pathlib import Path
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from ttts.utils.utils import EMA, clean_checkpoints, plot_spectrogram_to_numpy, summarize, update_moving_average
-from ttts.gpt.dataset import GptTtsCollater, GptTtsDataset
-from ttts.gpt.model import UnifiedVoice
+from vqvae.utils.log_utils import clean_checkpoints, summarize
+from gpt.dataset import GptTtsCollater, GptTtsDataset
+from gpt.model import UnifiedVoice
 import torch
 import os
 from torch.utils.data import DataLoader
@@ -16,6 +16,8 @@ from torch.optim import AdamW
 from accelerate import Accelerator
 
 
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 def set_requires_grad(model, val):
     for p in model.parameters():
         p.requires_grad = val
@@ -39,20 +41,19 @@ def warmup(step):
     else:
         return 1
 class Trainer(object):
-    def __init__(self, cfg_path='ttts/gpt/config.json'):
+    def __init__(self, cfg_path='gpt/config.json'):
         self.accelerator = Accelerator()
         self.cfg = json.load(open(cfg_path))
         self.gpt = UnifiedVoice(**self.cfg['gpt'])
+        print("GPT params:", count_parameters(self.gpt))
         self.dataset = GptTtsDataset(self.cfg)
         self.dataloader = DataLoader(self.dataset, **self.cfg['dataloader'], collate_fn=GptTtsCollater(self.cfg))
         self.train_steps = self.cfg['train']['train_steps']
         self.val_freq = self.cfg['train']['val_freq']
         if self.accelerator.is_main_process:
-            self.ema_model = self._get_target_encoder(self.gpt).to(self.accelerator.device)
             now = datetime.now()
             self.logs_folder = Path(self.cfg['train']['logs_folder']+'/'+now.strftime("%Y-%m-%d-%H-%M-%S"))
             self.logs_folder.mkdir(exist_ok = True, parents=True)
-        self.ema_updater = EMA(0.999)
         self.optimizer = AdamW(self.gpt.parameters(),lr=self.cfg['train']['lr'], betas=(0.9, 0.96), weight_decay=0.01)
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=warmup)
         self.gpt, self.dataloader, self.optimizer, self.scheduler = self.accelerator.prepare(self.gpt, self.dataloader, self.optimizer, self.scheduler)
@@ -84,8 +85,6 @@ class Trainer(object):
         self.step = data['step']
         gpt = accelerator.unwrap_model(self.gpt)
         gpt.load_state_dict(state_dict)
-        if self.accelerator.is_local_main_process:
-            self.ema_model.load_state_dict(state_dict)
     def train(self):
         accelerator = self.accelerator
         device = accelerator.device
@@ -101,7 +100,7 @@ class Trainer(object):
                     if data==None:
                         continue
                     # speech_conditioning_latent, text_inputs, text_lengths, mel_codes, wav_lengths
-                    input_params = [data['padded_text'], data['text_lengths'],
+                    input_params = [data['padded_spec'], data['spec_lengths'], data['padded_text'], data['text_lengths'],
                         data['padded_qmel'], data['wav_lens']]
                     input_params = [d.to(device) for d in input_params]
                     with self.accelerator.autocast():
@@ -121,7 +120,6 @@ class Trainer(object):
                 accelerator.wait_for_everyone()
                 # print(prof.key_averages(group_by_stack_n=5).table(sort_by='self_cpu_time_total', row_limit=5))
                 # if accelerator.is_main_process:
-                #     update_moving_average(self.ema_updater,self.ema_model,self.gpt)
                 if accelerator.is_main_process and self.step % self.val_freq == 0:
                     scalar_dict = {"loss": total_loss, "loss_mel":loss_mel, "loss_text":loss_text, "loss/grad": grad_norm, "lr":self.scheduler.get_last_lr()[0]}
                     summarize(
@@ -141,5 +139,5 @@ class Trainer(object):
 
 if __name__ == '__main__':
     trainer = Trainer()
-    # trainer.load('/home/hyc/tortoise_plus_zh/ttts/gpt/logs/2024-04-07-18-57-39/model-322.pt')
+    trainer.load('/home/hyc/detail_tts/gpt/logs/2024-06-18-10-55-01/model-11.pt')
     trainer.train()

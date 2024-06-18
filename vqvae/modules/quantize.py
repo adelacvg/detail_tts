@@ -13,7 +13,7 @@ import typing as tp
 import torch
 from torch import nn
 
-from modules.core_vq import ResidualVectorQuantization
+from vqvae.modules.core_vq import ResidualVectorQuantization
 
 
 @dataclass

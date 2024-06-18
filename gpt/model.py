@@ -6,8 +6,9 @@ import torch.nn.functional as F
 from transformers import GPT2Config, GPT2PreTrainedModel, LogitsProcessorList
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 from transformers.utils.model_parallel_utils import get_device_map, assert_device_map
-from modules.typical_sampling import TypicalLogitsWarper
-from modules.modules import MelStyleEncoder
+from gpt.modules.typical_sampling import TypicalLogitsWarper
+from gpt.modules.modules import MelStyleEncoder
+import vqvae.modules.commons as commons
 def null_position_embeddings(range, dim):
     return torch.zeros((range.shape[0], range.shape[1], dim), device=range.device)
 
@@ -424,7 +425,7 @@ class UnifiedVoice(nn.Module):
         conds = conds.mean(dim=1)
         return conds
 
-    def forward(self, speech_conditioning_latent, text_inputs, text_lengths, mel_codes, wav_lengths, types=None, text_first=True, raw_mels=None, return_attentions=False,
+    def forward(self, speech_conditioning_latent, cond_lengths, text_inputs, text_lengths, mel_codes, wav_lengths, types=None, text_first=True, raw_mels=None, return_attentions=False,
                 return_latent=False, clip_inputs=False):
         """
         Forward pass that uses both text and voice in either text conditioning mode or voice conditioning mode
@@ -441,8 +442,9 @@ class UnifiedVoice(nn.Module):
         If return_latent is specified, loss & logits are not computed or returned. Only the predicted latents are returned.
         If clip_inputs is True, the inputs will be clipped to the smallest input size across each input modality.
         """
-
-        speech_conditioning_latent = self.get_conditioning(speech_conditioning_latent)
+        cond = speech_conditioning_latent
+        cond_mask = torch.unsqueeze(commons.sequence_mask(cond_lengths, cond.size(2)), 1).to(cond.dtype)
+        speech_conditioning_latent = self.conditioning_encoder(cond, cond_mask).transpose(1,2)
         # Types are expressed by expanding the text embedding space.
         if types is not None:
             text_inputs = text_inputs * (1+types).unsqueeze(-1)
@@ -508,7 +510,39 @@ class UnifiedVoice(nn.Module):
         )
         gpt_inputs[:, -1] = self.start_mel_token
         return gpt_inputs
-    def inference_speech(self, speech_conditioning_latent, text_inputs, mel_codes, input_tokens=None, num_return_sequences=1,
+    def inference_speech_tortoise(self, speech_conditioning_latent, cond_lengths, text_inputs, input_tokens=None, num_return_sequences=1,
+                         max_generate_length=None, typical_sampling=False, typical_mass=.9, **hf_generate_kwargs):        
+
+        text_inputs = F.pad(text_inputs, (0, 1), value=self.stop_text_token)
+        text_inputs, _ = self.build_aligned_inputs_and_targets(text_inputs, self.start_text_token, self.stop_text_token)
+        text_emb = self.text_embedding(text_inputs) + self.text_pos_embedding(text_inputs)
+
+        cond = speech_conditioning_latent
+        cond_mask = torch.unsqueeze(commons.sequence_mask(cond_lengths, cond.size(2)), 1).to(cond.dtype)
+        speech_conditioning_latent = self.conditioning_encoder(cond, cond_mask).transpose(1,2)
+        conds = speech_conditioning_latent
+        emb = torch.cat([conds, text_emb], dim=1)
+        self.inference_model.store_mel_emb(emb)
+
+        fake_inputs = torch.full((emb.shape[0], conds.shape[1] + emb.shape[1],), fill_value=1, dtype=torch.long,
+                                 device=text_inputs.device)
+        fake_inputs[:, -1] = self.start_mel_token
+        trunc_index = fake_inputs.shape[1]
+        if input_tokens is None:
+            inputs = fake_inputs
+        else:
+            assert num_return_sequences % input_tokens.shape[0] == 0, "The number of return sequences must be divisible by the number of input sequences"
+            fake_inputs = fake_inputs.repeat(num_return_sequences, 1)
+            input_tokens = input_tokens.repeat(num_return_sequences // input_tokens.shape[0], 1)
+            inputs = torch.cat([fake_inputs, input_tokens], dim=1)
+
+        logits_processor = LogitsProcessorList([TypicalLogitsWarper(mass=typical_mass)]) if typical_sampling else LogitsProcessorList()
+        max_length = trunc_index + self.max_mel_tokens - 1  if max_generate_length is None else trunc_index + max_generate_length
+        gen = self.inference_model.generate(inputs, bos_token_id=self.start_mel_token, pad_token_id=self.stop_mel_token, eos_token_id=self.stop_mel_token,
+                                            max_length=max_length, logits_processor=logits_processor,
+                                            num_return_sequences=num_return_sequences, **hf_generate_kwargs)
+        return gen[:, trunc_index:]
+    def inference_speech_valle(self, speech_conditioning_latent, cond_lengths, text_inputs, mel_codes, input_tokens=None, num_return_sequences=1,
                          max_generate_length=None, typical_sampling=False, typical_mass=.9, **hf_generate_kwargs):        
 
         text_inputs = F.pad(text_inputs, (0, 1), value=self.stop_text_token)
@@ -516,7 +550,10 @@ class UnifiedVoice(nn.Module):
         text_emb = self.text_embedding(text_inputs) + self.text_pos_embedding(text_inputs)
         mel_codes, _ = self.build_aligned_inputs_and_targets(mel_codes, self.start_mel_token, self.stop_mel_token)
 
-        speech_conditioning_latent = self.get_conditioning(speech_conditioning_latent)
+        cond = speech_conditioning_latent
+        cond_mask = torch.unsqueeze(commons.sequence_mask(cond_lengths, cond.size(2)), 1).to(cond.dtype)
+        speech_conditioning_latent = self.conditioning_encoder(cond, cond_mask).transpose(1,2)
+        conds = speech_conditioning_latent
         emb = torch.cat([conds, text_emb], dim=1)
         self.inference_model.store_mel_emb(emb)
 
