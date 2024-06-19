@@ -8,7 +8,7 @@ from vqvae.utils.data_utils import spectrogram_torch,HParams
 import random
 import torchaudio
 
-model_path = '/home/hyc/detail_tts/vqvae/logs/2024-06-14-17-43-57/model-159.pt'
+model_path = '/home/hyc/detail_tts/vqvae/logs/2024-06-19-12-53-53/model-205.pt'
 device = 'cuda'
 vqvae = load_model('vqvae', model_path, 'vqvae/configs/config.json', device)
 hps = HParams(**json.load(open('vqvae/configs/config.json')))

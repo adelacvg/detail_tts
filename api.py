@@ -3,7 +3,7 @@ import torch
 import json
 
 MODELS = {
-    'vqvae.pth':'vqvae/logs/2024-06-14-17-43-57/model-159.pt',
+    'vqvae.pth':'/home/hyc/detail_tts/vqvae/logs/2024-06-19-07-19-25/model-194.pt',
     'gpt.pth': '/home/hyc/detail_tts/gpt/logs/2024-06-18-11-26-17/model-17.pt',
 }
 

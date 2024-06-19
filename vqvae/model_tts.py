@@ -597,20 +597,21 @@ class SynthesizerTrn(nn.Module):
         x = self.enc_p[1](x, y_lengths//2, g=g)
         x = self.proj[1](x)
         x = self.enc_p[2](x,y_lengths//4, g=g)
-        quantized, codes, commit_loss, quantized_list = self.quantizer(x, layers=[0])
+        commit_loss = 0
+        # quantized, codes, commit_loss, quantized_list = self.quantizer(x, layers=[0])
         
         l_diff=0
-        base = self.code_emb(codes[0]).transpose(1,2)
-        noise = ((x.detach()-base)/100).detach()
-        f = random.randint(0,1)
-        if f==0:
-            i = 0
-        else:
-            i = random.randint(1,100)
-        base = self.code_emb(codes[0]).transpose(1,2)
-        in_i = base+noise*i+torch.randn_like(base)*0.005
-        noise_ = self.diff_enc(in_i, y_lengths//4, g=g)
-        l_diff += torch.sum(((noise - noise_)**2)*quantized_mask) / torch.sum(quantized_mask)
+        # base = self.code_emb(codes[0]).transpose(1,2)
+        # noise = ((x.detach()-base)/100).detach()
+        # f = random.randint(0,1)
+        # if f==0:
+        #     i = 0
+        # else:
+        #     i = random.randint(1,100)
+        # base = self.code_emb(codes[0]).transpose(1,2)
+        # in_i = base+noise*i+torch.randn_like(base)*0.005
+        # noise_ = self.diff_enc(in_i, y_lengths//4, g=g)
+        # l_diff += torch.sum(((noise - noise_)**2)*quantized_mask) / torch.sum(quantized_mask)
 
         x = self.proj_out[0](x)
         x = self.enc_p[3](x,y_lengths//2)
@@ -647,15 +648,16 @@ class SynthesizerTrn(nn.Module):
         x = self.enc_p[1](x, y_lengths//2, g=g)
         x = self.proj[1](x)
         x = self.enc_p[2](x,y_lengths//4, g=g)
-        quantized, codes, commit_loss, quantized_list = self.quantizer(x, layers=[0])
-        quantized_ = self.code_emb(codes[0]).transpose(1,2)
-        for i in range(10):
-            noise = self.diff_enc(quantized_,y_lengths//4,g=g)
-            quantized_ = quantized_ + noise
-        for i in range(18):
-            noise = self.diff_enc(quantized_,y_lengths//4,g=g)
-            quantized_ = quantized_ + noise*5
-        quantized = quantized_
+        quantized = x
+        # quantized, codes, commit_loss, quantized_list = self.quantizer(x, layers=[0])
+        # quantized_ = self.code_emb(codes[0]).transpose(1,2)
+        # for i in range(10):
+        #     noise = self.diff_enc(quantized_,y_lengths//4,g=g)
+        #     quantized_ = quantized_ + noise
+        # for i in range(18):
+        #     noise = self.diff_enc(quantized_,y_lengths//4,g=g)
+        #     quantized_ = quantized_ + noise*5
+        # quantized = quantized_
         x = self.proj_out[0](quantized)
         x = self.enc_p[3](x,y_lengths//2)
         x = self.proj_out[1](x)

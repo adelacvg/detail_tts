@@ -8,7 +8,7 @@ import json
 from vqvae.utils.data_utils import spectrogram_torch,HParams
 import random
 
-model_path = '/home/hyc/detail_tts/vqvae/logs/2024-06-14-17-43-57/model-159.pt'
+model_path = '/home/hyc/detail_tts/vqvae/logs/2024-06-19-07-19-25/model-194.pt'
 # device_ids = [4,5,6,7]
 # rank = random.choice(device_ids)
 # device = f'cuda:{rank}'

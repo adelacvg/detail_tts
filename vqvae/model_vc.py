@@ -508,7 +508,7 @@ class SynthesizerTrn(nn.Module):
             filter_channels,
             False,
             n_heads,
-            6,
+            12,
             kernel_size,
             p_dropout,
             gin_channels = gin_channels,
@@ -522,7 +522,7 @@ class SynthesizerTrn(nn.Module):
             nn.ConvTranspose1d(inter_channels, inter_channels, 3, 2, 1,output_padding=1),
             SpecEncoder(inter_channels, hidden_channels, filter_channels, False, n_heads, 3, kernel_size, p_dropout,gin_channels = gin_channels),
             nn.ConvTranspose1d(inter_channels, inter_channels, 3, 2, 1,output_padding=1),
-            SpecEncoder(inter_channels, hidden_channels, filter_channels, True, n_heads, 3, kernel_size, p_dropout,gin_channels = gin_channels),]
+            SpecEncoder(inter_channels, hidden_channels, filter_channels, False, n_heads, 3, kernel_size, p_dropout,gin_channels = gin_channels),]
             )
         self.quantizer = ResidualVectorQuantizer(dimension=hidden_channels, n_q=8, bins=1024)
         self.f0_prenet = nn.Conv1d(1, hidden_channels, 3, padding=1)
@@ -530,6 +530,17 @@ class SynthesizerTrn(nn.Module):
         nn.init.normal_(self.code_emb.weight, 0.0, hidden_channels**-0.5)
 
         # self.quantizer.requires_grad_(False)
+        # self.enc_text.requires_grad_(False)
+        # [self.ssl_proj[i].requires_grad_(False) for i in [0,1,2,3,4,5,6,7,8]]
+        # [l.requires_grad_(False) for l in self.enc_p]
+        # self.f0_detail_enc.requires_grad_(False)
+        # self.detail_enc.requires_grad_(False)
+        # self.f0_decoder.requires_grad_(False)
+        # self.flow.requires_grad_(False)
+        # self.enc_q.requires_grad_(False)
+        # self.dec.requires_grad_(False)
+        self.requires_grad_(False)
+        self.quantized_detail_enc.requires_grad_(True)
 
     def forward(self, spec, spec_lengths, f0, uv):
         quantized_mask = torch.unsqueeze(commons.sequence_mask(spec_lengths//4, spec.size(2)//4), 1).to(spec.dtype)
@@ -546,19 +557,18 @@ class SynthesizerTrn(nn.Module):
         x3 = self.ssl_proj[2](x2,spec_lengths//2,g)
         x4 = self.ssl_proj[3](x3)
         x5 = self.ssl_proj[4](x4,spec_lengths//4,g)
-        l_quantized_detail = 0
         quantized, codes, commit_loss, quantized_list = self.quantizer(x5, layers=[0,1,2,3,4,5,6,7])
 
         base = self.code_emb(codes[0]).transpose(1,2)
-        noise = ((x5.detach()-base)//100).detach()
+        noise = ((x5.detach()-base)/100).detach()
         # f = random.randint(0,2)
         # if f==0:
         #     i = 0
         # else:
-        i = random.randint(0,100)
-        quantized_detail = base+noise*i+torch.randn_like(base)*0.005
+        quantized_detail = torch.stack([
+            base[i]+noise[i]*random.randint(0,100)+0.05*torch.randn_like(base[i]) for i in range(x.shape[0])])
         quantized_detail_ = self.quantized_detail_enc(quantized_detail, spec_lengths//4, g=g)
-        l_quantized_detail += torch.sum(((noise - quantized_detail_)**2)*quantized_mask) / torch.sum(quantized_mask)
+        l_quantized_detail = torch.sum(((x5.detach() - quantized_detail_)**2)*quantized_mask) / torch.sum(quantized_mask)
         x6 = self.ssl_proj[5](x5)
         x7 = self.ssl_proj[6](x6,spec_lengths//2,g)
         x8 = self.ssl_proj[7](x7)
@@ -616,11 +626,14 @@ class SynthesizerTrn(nn.Module):
         quantized = x5
         quantized, codes, commit_loss, quantized_list = self.quantizer(x5, layers=[0,1,2,3,4,5,6,7])
         quantized_ = self.code_emb(codes[0]).transpose(1,2)
+        base = quantized_
         for i in range(10):
-            noise = self.quantized_detail_enc(quantized_,c_lengths//4,g=g)
+            x0 = self.quantized_detail_enc(quantized_,c_lengths//4,g=g)
+            noise = (x0-base)/100
             quantized_ = quantized_ + noise
         for i in range(18):
-            noise = self.quantized_detail_enc(quantized_,c_lengths//4,g=g)
+            x0 = self.quantized_detail_enc(quantized_,c_lengths//4,g=g)
+            noise = (x0-base)/100
             quantized_ = quantized_ + noise*5
         quantized = quantized_
         x6 = self.ssl_proj[5](quantized)
@@ -663,11 +676,14 @@ class SynthesizerTrn(nn.Module):
         g = self.ref_enc(refer, refer_mask)
         
         quantized_ = self.code_emb(code).transpose(1,2)
+        base = quantized_
         for i in range(10):
-            noise = self.quantized_detail_enc(quantized_,c_lengths//4,g=g)
+            x0 = self.quantized_detail_enc(quantized_,c_lengths//4,g=g)
+            noise = (x0-base)/100
             quantized_ = quantized_ + noise
         for i in range(18):
-            noise = self.quantized_detail_enc(quantized_,c_lengths//4,g=g)
+            x0 = self.quantized_detail_enc(quantized_,c_lengths//4,g=g)
+            noise = (x0-base)/100
             quantized_ = quantized_ + noise*5
         quantized = quantized_
         x6 = self.ssl_proj[5](quantized)
