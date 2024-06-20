@@ -258,7 +258,7 @@ class VectorQuantization(nn.Module):
         kmeans_init: bool = True,
         kmeans_iters: int = 50,
         threshold_ema_dead_code: int = 2,
-        commitment_weight: float = 1.0,
+        commitment_weight: float = 0.0,
     ):
         super().__init__()
         _codebook_dim: int = default(codebook_dim, dim)
@@ -313,6 +313,7 @@ class VectorQuantization(nn.Module):
 
         loss = torch.tensor([0.0], device=device, requires_grad=self.training)
 
+        loss = loss + F.mse_loss(quantize, x.detach())
         if self.training:
             if self.commitment_weight > 0:
                 commit_loss = F.mse_loss(quantize.detach(), x)

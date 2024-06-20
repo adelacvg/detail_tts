@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from utils.log_utils import clean_checkpoints, plot_spectrogram_to_numpy, summarize
+from vqvae.utils.log_utils import clean_checkpoints, plot_spectrogram_to_numpy, summarize
 from typing import List, Optional, Tuple, Union
 import torch
 import os
@@ -21,12 +21,12 @@ from torch import nn
 from torch.optim import AdamW
 from accelerate import Accelerator
 from model_tts import SynthesizerTrn, MultiPeriodDiscriminator
-from dataset_vc import TextAudioCollate, TextAudioSpeakerLoader
-from utils.data_utils import spec_to_mel_torch, mel_spectrogram_torch, HParams, spectrogram_torch
-from utils import utils
-import modules.commons as commons
+from dataset_tts import TextAudioCollate, TextAudioSpeakerLoader
+from vqvae.utils.data_utils import spec_to_mel_torch, mel_spectrogram_torch, HParams, spectrogram_torch
+from vqvae.utils import utils
+import vqvae.modules.commons as commons
 import torchaudio
-from modules.losses import generator_loss, discriminator_loss, feature_loss, kl_loss
+from vqvae.modules.losses import generator_loss, discriminator_loss, feature_loss, kl_loss
 from torchaudio.functional import phase_vocoder, resample, spectrogram
 from torchaudio import transforms
 torch.backends.cudnn.benchmark = False
@@ -102,7 +102,7 @@ class Trainer(object):
             now = datetime.now()
             self.logs_folder = Path(self.cfg['train']['logs_folder']+'/'+now.strftime("%Y-%m-%d-%H-%M-%S"))
             self.logs_folder.mkdir(exist_ok = True, parents=True)
-        self.G = SynthesizerTrn(hps.data.filter_length // 2 + 1,hps.train.segment_size // hps.data.hop_length, **hps.model)
+        self.G = SynthesizerTrn(hps.data.filter_length // 2 + 1,hps.train.segment_size // hps.data.hop_length, **hps.model, cfg=hps)
         self.D = MultiPeriodDiscriminator()
         print("G params:", count_parameters(self.G))
         print("D params:", count_parameters(self.D))
@@ -175,7 +175,7 @@ class Trainer(object):
                 self.dataloader.batch_sampler.epoch=epoch
                 for data in self.dataloader:
                     data = [d.to(device) for d in data]
-                    c, f0, spec, y, lengths, uv = data
+                    spec, y, lengths = data
                     wav = y
                     # with torch.autograd.detect_anomaly():
                     with self.accelerator.autocast():
@@ -298,5 +298,5 @@ class Trainer(object):
 
 if __name__ == '__main__':
     trainer = Trainer(cfg_path='vqvae/configs/config.json')
-    # trainer.load('/home/hyc/detail_tts/vqvae/logs/2024-06-18-14-12-14/model-4.pt')
+    trainer.load('/home/hyc/detail_tts/vqvae/logs/2024-06-20-08-39-14/model-60.pt')
     trainer.train()

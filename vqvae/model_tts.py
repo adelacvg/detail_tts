@@ -12,6 +12,8 @@ from torch import nn
 from torch.nn import functional as F
 import vqvae.modules.commons as commons
 from vqvae.modules import modules, attentions
+from vqvae.utils.diffusion import SpacedDiffusion, space_timesteps, get_named_beta_schedule
+from vqvae.diff_model import DiffusionTts
 
 from torch.nn import Conv1d, ConvTranspose1d, AvgPool1d, Conv2d
 from torch.nn.utils import weight_norm, remove_weight_norm, spectral_norm
@@ -473,6 +475,21 @@ class DurationPredictor(nn.Module):
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+def do_spectrogram_diffusion(diffusion_model, diffuser, latents, conditioning_latents, temperature=1, verbose=True):
+    """
+    Uses the specified diffusion model to convert discrete codes into a spectrogram.
+    """
+    with torch.no_grad():
+        output_seq_len = latents.shape[2] # This diffusion model converts from 22kHz spectrogram codes to a 24kHz spectrogram signal.
+        output_shape = (latents.shape[0], 192, output_seq_len)
+        precomputed_embeddings = diffusion_model.timestep_independent(latents, conditioning_latents, output_seq_len, False)
+
+        noise = torch.randn(output_shape, device=latents.device) * temperature
+        mel = diffuser.p_sample_loop(diffusion_model, output_shape, noise=noise,
+                                    model_kwargs={'precomputed_aligned_embeddings': precomputed_embeddings},
+                                    progress=verbose)
+        return mel[:,:,:output_seq_len]
 class SynthesizerTrn(nn.Module):
     """
     Synthesizer for Training
@@ -499,8 +516,7 @@ class SynthesizerTrn(nn.Module):
         n_speakers=0,
         gin_channels=0,
         semantic_frame_rate=None,
-        down_times=2,
-        stage2=None,
+        cfg=None,
         **kwargs
     ):
         super().__init__()
@@ -522,7 +538,11 @@ class SynthesizerTrn(nn.Module):
         self.n_speakers = n_speakers
         self.gin_channels = gin_channels
         self.mel_size = prosody_size
-        self.down_times=down_times
+        trained_diffusion_steps = 4000
+        self.trained_diffusion_steps = 4000
+        desired_diffusion_steps = 200
+        self.desired_diffusion_steps = 200
+        cond_free_k = 2.
 
         self.dec = Generator(
             inter_channels,
@@ -555,17 +575,13 @@ class SynthesizerTrn(nn.Module):
                 n_layers, kernel_size, p_dropout),
             ]
         )
-        self.diff_enc = SpecEncoder(
-            inter_channels,
-            hidden_channels,
-            filter_channels,
-            False,
-            n_heads,
-            8,
-            kernel_size,
-            p_dropout,
-            gin_channels = gin_channels,
-        )
+        self.diffuser= SpacedDiffusion(use_timesteps=space_timesteps(trained_diffusion_steps, [desired_diffusion_steps]), model_mean_type='epsilon',
+                           model_var_type='learned_range', loss_type='mse', betas=get_named_beta_schedule('linear', trained_diffusion_steps),
+                           conditioning_free=False, conditioning_free_k=cond_free_k)
+        self.infer_diffuser = SpacedDiffusion(use_timesteps=space_timesteps(trained_diffusion_steps, [50]), model_mean_type='epsilon',
+                           model_var_type='learned_range', loss_type='mse', betas=get_named_beta_schedule('linear', trained_diffusion_steps),
+                           conditioning_free=True, conditioning_free_k=cond_free_k, sampler='dpm++2m')
+        self.diffusion = DiffusionTts(**cfg['diffusion'])
         self.enc_p = nn.ModuleList(self.enc_p)
         self.enc_q = PosteriorEncoder(
             spec_channels, inter_channels, hidden_channels, True,
@@ -576,15 +592,18 @@ class SynthesizerTrn(nn.Module):
         self.ref_enc = modules.MelStyleEncoder(
             spec_channels, style_vector_dim=gin_channels
         )
-        self.quantizer = ResidualVectorQuantizer(dimension=hidden_channels, n_q=1, bins=1024)
         self.proj = []
         self.proj.extend([nn.Conv1d(inter_channels, inter_channels, kernel_size=2, stride=2) for _ in range(2)])
         self.proj = nn.ModuleList(self.proj)
         self.proj_out = []
         self.proj_out.extend([nn.ConvTranspose1d(inter_channels, inter_channels, kernel_size=2, stride=2) for _ in range(2)])
         self.proj_out = nn.ModuleList(self.proj_out)
+        self.quantizer = ResidualVectorQuantizer(dimension=hidden_channels, n_q=1, bins=1024)
         self.code_emb = nn.Embedding(1024, hidden_channels)
         nn.init.normal_(self.code_emb.weight, 0.0, hidden_channels**-0.5)
+        # self.code_emb.requires_grad_(False)
+        # self.quantizer.requires_grad_(False)
+        # self.diffusion.requires_grad_(False)
 
     def forward(self, y, y_lengths):
         # with profiler.profile(with_stack=True, profile_memory=True) as prof:
@@ -597,21 +616,22 @@ class SynthesizerTrn(nn.Module):
         x = self.enc_p[1](x, y_lengths//2, g=g)
         x = self.proj[1](x)
         x = self.enc_p[2](x,y_lengths//4, g=g)
-        commit_loss = 0
-        # quantized, codes, commit_loss, quantized_list = self.quantizer(x, layers=[0])
-        
         l_diff=0
-        # base = self.code_emb(codes[0]).transpose(1,2)
-        # noise = ((x.detach()-base)/100).detach()
-        # f = random.randint(0,1)
-        # if f==0:
-        #     i = 0
-        # else:
-        #     i = random.randint(1,100)
-        # base = self.code_emb(codes[0]).transpose(1,2)
-        # in_i = base+noise*i+torch.randn_like(base)*0.005
-        # noise_ = self.diff_enc(in_i, y_lengths//4, g=g)
-        # l_diff += torch.sum(((noise - noise_)**2)*quantized_mask) / torch.sum(quantized_mask)
+        commit_loss=0
+        quantized, codes, commit_loss, quantized_list = self.quantizer(x.detach(), layers=[0])
+        x_start = x.detach()
+        t = torch.randint(0, self.desired_diffusion_steps, (x_start.shape[0],), device=x.device).long().to(x.device)
+        aligned_conditioning = self.code_emb(codes[0]).transpose(1,2)
+        conditioning_latent = g.detach()
+        l_diff = self.diffuser.training_losses( 
+            model = self.diffusion, 
+            x_start = x_start,
+            t = t,
+            model_kwargs = {
+                "aligned_conditioning": aligned_conditioning,
+                "conditioning_latent": conditioning_latent
+            },
+            )["loss"].mean()
 
         x = self.proj_out[0](x)
         x = self.enc_p[3](x,y_lengths//2)
@@ -649,15 +669,9 @@ class SynthesizerTrn(nn.Module):
         x = self.proj[1](x)
         x = self.enc_p[2](x,y_lengths//4, g=g)
         quantized = x
-        # quantized, codes, commit_loss, quantized_list = self.quantizer(x, layers=[0])
-        # quantized_ = self.code_emb(codes[0]).transpose(1,2)
-        # for i in range(10):
-        #     noise = self.diff_enc(quantized_,y_lengths//4,g=g)
-        #     quantized_ = quantized_ + noise
-        # for i in range(18):
-        #     noise = self.diff_enc(quantized_,y_lengths//4,g=g)
-        #     quantized_ = quantized_ + noise*5
-        # quantized = quantized_
+        quantized, codes, commit_loss, quantized_list = self.quantizer(x, layers=[0])
+        quantized = self.code_emb(codes[0]).transpose(1,2)
+        quantized = do_spectrogram_diffusion(self.diffusion, self.infer_diffuser,quantized,g,temperature=0.8)
         x = self.proj_out[0](quantized)
         x = self.enc_p[3](x,y_lengths//2)
         x = self.proj_out[1](x)
@@ -666,4 +680,15 @@ class SynthesizerTrn(nn.Module):
         z = self.flow(z_p, y_mask, g=g, reverse=True)
         o = self.dec(z, g=g)
         return  o
+    def encode(self, y, y_lengths):
+        y_mask = torch.unsqueeze( commons.sequence_mask(y_lengths, y.size(2)), 1).to(y.dtype)
+        g = self.ref_enc(y * y_mask, y_mask)
+        x = self.enc_p[0](y, y_lengths, g=g)
+        x = self.proj[0](x)
+        x = self.enc_p[1](x, y_lengths//2, g=g)
+        x = self.proj[1](x)
+        x = self.enc_p[2](x,y_lengths//4, g=g)
+        quantized, codes, commit_loss, quantized_list = self.quantizer(x.detach(), layers=[0])
+        return codes[0].detach()
+        
 

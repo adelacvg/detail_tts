@@ -8,10 +8,12 @@ from tqdm import tqdm
 from vqvae.utils.log_utils import clean_checkpoints, summarize
 from gpt.dataset import GptTtsCollater, GptTtsDataset
 from gpt.model import UnifiedVoice
+from vqvae.utils.data_utils import spec_to_mel_torch, mel_spectrogram_torch, HParams, spectrogram_torch
 import torch
 import os
 from torch.utils.data import DataLoader
 from torch import nn
+from prepare.load_infer import load_model
 from torch.optim import AdamW
 from accelerate import Accelerator
 
@@ -44,6 +46,8 @@ class Trainer(object):
     def __init__(self, cfg_path='gpt/config.json'):
         self.accelerator = Accelerator()
         self.cfg = json.load(open(cfg_path))
+        hps = HParams(**self.cfg)
+        self.hps = hps
         self.gpt = UnifiedVoice(**self.cfg['gpt'])
         print("GPT params:", count_parameters(self.gpt))
         self.dataset = GptTtsDataset(self.cfg)
@@ -56,7 +60,8 @@ class Trainer(object):
             self.logs_folder.mkdir(exist_ok = True, parents=True)
         self.optimizer = AdamW(self.gpt.parameters(),lr=self.cfg['train']['lr'], betas=(0.9, 0.96), weight_decay=0.01)
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=warmup)
-        self.gpt, self.dataloader, self.optimizer, self.scheduler = self.accelerator.prepare(self.gpt, self.dataloader, self.optimizer, self.scheduler)
+        self.vqvae = load_model('vqvae', self.cfg['dataset']['vqvae_path'], 'vqvae/configs/config.json', 'cpu')
+        self.gpt, self.dataloader, self.optimizer, self.scheduler, self.vqvae = self.accelerator.prepare(self.gpt, self.dataloader, self.optimizer, self.scheduler, self.vqvae)
         self.dataloader = cycle(self.dataloader)
         self.step=0
         self.gradient_accumulate_every=self.cfg['train']['accumulate_num']
@@ -99,9 +104,16 @@ class Trainer(object):
                     data = next(self.dataloader)
                     if data==None:
                         continue
+                    wav = data['padded_wav'].squeeze(1)
+                    with torch.no_grad():
+                        spec = spectrogram_torch(wav, self.hps.data.filter_length,
+                        self.hps.data.hop_length, self.hps.data.win_length, center=False)
+                        spec_lengths = data['wav_lens']//self.hps.data.hop_length
+                        code = self.vqvae.encode(spec,spec_lengths).squeeze(0).squeeze(0)
                     # speech_conditioning_latent, text_inputs, text_lengths, mel_codes, wav_lengths
-                    input_params = [data['padded_spec'], data['spec_lengths'], data['padded_text'], data['text_lengths'],
-                        data['padded_qmel'], data['wav_lens']]
+                    input_params = [spec, spec_lengths,
+                        data['padded_text'], data['text_lengths'],
+                        code, data['wav_lens']]
                     input_params = [d.to(device) for d in input_params]
                     with self.accelerator.autocast():
                         loss_text, loss_mel, mel_logits = self.gpt(*input_params)
@@ -139,5 +151,5 @@ class Trainer(object):
 
 if __name__ == '__main__':
     trainer = Trainer()
-    trainer.load('/home/hyc/detail_tts/gpt/logs/2024-06-18-10-55-01/model-11.pt')
+    # trainer.load('/home/hyc/detail_tts/gpt/logs/2024-06-18-10-55-01/model-11.pt')
     trainer.train()

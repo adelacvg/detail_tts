@@ -35,18 +35,19 @@ class GptTtsDataset(torch.utils.data.Dataset):
         self.audiopaths_and_text = read_jsonl(self.jsonl_path)
         self.audiopaths_and_text = sorted(self.audiopaths_and_text,
                 key=lambda x: x['path'])
-    def get_text_and_vq(self, audiopath_and_text):
+        self.sampling_rate = opt['dataset']['sampling_rate']
+    def get_text_and_wav(self, audiopath_and_text):
         audiopath, text = audiopath_and_text['path'][5:], audiopath_and_text['text']
         text = ' '.join(lazy_pinyin(text, style=Style.TONE3, neutral_tone_with_five=True))
         text = ' '+text+' '
         text = self.tok.encode(text)
         text = LongTensor(text)
         # Fetch quantized MELs
-        quant_path = audiopath + '.vq.pth'
-        vq = LongTensor(torch.load(quant_path))
-        spec_path = audiopath + '.spec.pth'
-        spec = torch.load(spec_path).detach().squeeze(0)
-        return text, vq, spec
+        wav, sr = torchaudio.load(audiopath)
+        if wav.shape[0] > 1:
+            wav = wav[0].unsqueeze(0)
+        wav = torchaudio.functional.resample(wav, sr, self.sampling_rate)
+        return text, wav
     def is_same_spk(self, path1, path2):
         name1 = Path(path1).parent.name
         name2 = Path(path2).parent.name
@@ -54,20 +55,19 @@ class GptTtsDataset(torch.utils.data.Dataset):
             return True
         return False
     def __getitem__(self, index):
-        squeeze_scale = 2048
         try:
             # Fetch text and add start/stop tokens.
             audiopath_and_text = self.audiopaths_and_text[index]
-            text, vq, spec = self.get_text_and_vq(audiopath_and_text)
+            text, wav = self.get_text_and_wav(audiopath_and_text)
             pths = self.audiopaths_and_text
-            wav_length = vq.shape[-1]*squeeze_scale
+            wav_length = wav.shape[-1]
         except Exception as e:
             print(e)
             return None
-        if text.shape[-1]>=1600 or vq.shape[-1]>=3200:
+        if text.shape[-1]>=1600:
             return None 
         # load wav
-        return text, vq, wav_length, spec
+        return text, wav, wav_length
 
     def __len__(self):
         return len(self.audiopaths_and_text)
@@ -83,35 +83,26 @@ class GptTtsCollater():
             return None
         text_lens = [len(x[0]) for x in batch]
         max_text_len = max(text_lens)+1
-        qmel_lens = [len(x[1]) for x in batch]
-        max_qmel_len = max(qmel_lens)+1
+        wav_lens = [x[1].shape[-1] for x in batch]
+        max_wav_len = max(wav_lens)
         wav_lens = [x[2] for x in batch]
         max_wav_len = max(wav_lens)
-        spec_lens = [x[3].shape[1] for x in batch]
-        max_spec_len = max(spec_lens)+1
         texts = []
-        qmels = []
         wavs = []
-        specs = []
         # This is the sequential "background" tokens that are used as padding for text tokens, as specified in the DALLE paper.
         for b in batch:
-            text, qmel, wav_length, spec = b
+            text, wav, wav_length = b
             text = F.pad(text, (0, max_text_len-len(text)), value=0)
             texts.append(text)
-            qmels.append(F.pad(qmel, (0, max_qmel_len-len(qmel)), value=0))
-            specs.append(F.pad(spec,(0, max_spec_len-spec.shape[1]), value=0))
+            wavs.append(F.pad(wav, (0, max_wav_len-wav.shape[-1]), value=0))
 
-        padded_qmel = torch.stack(qmels)
         padded_texts = torch.stack(texts)
-        padded_spec = torch.stack(specs)
+        padded_wavs = torch.stack(wavs)
         return {
             'padded_text': padded_texts,
             'text_lengths': LongTensor(text_lens),
-            'padded_qmel': padded_qmel,
-            'qmel_lengths': LongTensor(qmel_lens),
+            'padded_wav': padded_wavs,
             'wav_lens': LongTensor(wav_lens),
-            'padded_spec': padded_spec,
-            'spec_lengths': LongTensor(spec_lens)
         }
 
 

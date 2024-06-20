@@ -524,7 +524,7 @@ class SynthesizerTrn(nn.Module):
             nn.ConvTranspose1d(inter_channels, inter_channels, 3, 2, 1,output_padding=1),
             SpecEncoder(inter_channels, hidden_channels, filter_channels, False, n_heads, 3, kernel_size, p_dropout,gin_channels = gin_channels),]
             )
-        self.quantizer = ResidualVectorQuantizer(dimension=hidden_channels, n_q=8, bins=1024)
+        self.quantizer = ResidualVectorQuantizer(dimension=hidden_channels, n_q=1, bins=1024)
         self.f0_prenet = nn.Conv1d(1, hidden_channels, 3, padding=1)
         self.code_emb = nn.Embedding(1024, hidden_channels)
         nn.init.normal_(self.code_emb.weight, 0.0, hidden_channels**-0.5)
@@ -557,7 +557,7 @@ class SynthesizerTrn(nn.Module):
         x3 = self.ssl_proj[2](x2,spec_lengths//2,g)
         x4 = self.ssl_proj[3](x3)
         x5 = self.ssl_proj[4](x4,spec_lengths//4,g)
-        quantized, codes, commit_loss, quantized_list = self.quantizer(x5, layers=[0,1,2,3,4,5,6,7])
+        quantized, codes, commit_loss, quantized_list = self.quantizer(x5, layers=[0])
 
         base = self.code_emb(codes[0]).transpose(1,2)
         noise = ((x5.detach()-base)/100).detach()
@@ -624,7 +624,7 @@ class SynthesizerTrn(nn.Module):
         x4 = self.ssl_proj[3](x3)
         x5 = self.ssl_proj[4](x4,c_lengths//4,g)
         quantized = x5
-        quantized, codes, commit_loss, quantized_list = self.quantizer(x5, layers=[0,1,2,3,4,5,6,7])
+        quantized, codes, commit_loss, quantized_list = self.quantizer(x5, layers=[0])
         quantized_ = self.code_emb(codes[0]).transpose(1,2)
         base = quantized_
         for i in range(10):
