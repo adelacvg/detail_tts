@@ -174,14 +174,15 @@ class Trainer(object):
             while self.step < self.train_steps:
                 self.dataloader.batch_sampler.epoch=epoch
                 for data in self.dataloader:
-                    data = [d.to(device) for d in data]
-                    spec, y, lengths = data
-                    wav = y
+                    for d in data:
+                        data[d] = data[d].to(device)
+                    spec, y, spec_length = data['spec'],data['wav'],data['spec_length']
+                    wav = data['raw_wav']
                     # with torch.autograd.detect_anomaly():
                     with self.accelerator.autocast():
-                        y_hat, diff_loss, commit_loss, ids_slice, z_mask,\
+                        y_hat, diff_loss, loss_gpt, commit_loss, ids_slice, z_mask,\
                         (z, z_p, m_p, logs_p, m_q, logs_q),\
-                        latent = self.G(spec, lengths)
+                        latent = self.G(spec, spec_length,data=data)
                         mel = spec_to_mel_torch(
                             spec,
                             hps.data.filter_length,
@@ -232,7 +233,7 @@ class Trainer(object):
                     loss_fm = feature_loss(fmap_r, fmap_g)
                     loss_gen, losses_gen = generator_loss(y_d_hat_g)
                     loss_gen_all = loss_gen + loss_fm + loss_mel \
-                        + loss_kl + commit_loss + diff_loss
+                        + loss_kl + commit_loss + diff_loss + loss_gpt
 
                     self.G_optimizer.zero_grad()
                     self.accelerator.backward(loss_gen_all)
@@ -248,7 +249,7 @@ class Trainer(object):
                         eval_model = self.accelerator.unwrap_model(self.G)
                         eval_model.eval()
                         with torch.no_grad():
-                            wav_eval = eval_model.infer(spec, lengths, spec, lengths)
+                            wav_eval = eval_model.infer(data['text'], data['text_length'], spec, spec_length)
                         eval_model.train()
                         scalar_dict = {
                                 "gen/loss_gen_all": loss_gen_all,
@@ -257,6 +258,7 @@ class Trainer(object):
                                 'gen/loss_mel':loss_mel,
                                 'gen/loss_kl':loss_kl, 
                                 'gen/loss_diff':diff_loss, 
+                                'gen/loss_gpt':loss_gpt, 
                                 'gen/loss_commit':commit_loss,
                                 "norm/G_grad": grad_norm_g, 
                                 "norm/D_grad": grad_norm_d,
@@ -298,5 +300,5 @@ class Trainer(object):
 
 if __name__ == '__main__':
     trainer = Trainer(cfg_path='vqvae/configs/config.json')
-    trainer.load('/home/hyc/detail_tts/vqvae/logs/2024-06-20-08-39-14/model-60.pt')
+    trainer.load('/home/hyc/detail_tts/vqvae/logs/2024-06-20-10-06-01/model-154.pt')
     trainer.train()

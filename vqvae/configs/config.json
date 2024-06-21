@@ -25,10 +25,12 @@
     "port": "8001",
     "keep_ckpts": 3,
     "all_in_mem": false,
-    "vol_aug": false
+    "vol_aug": false,
+    "text_weight":0.01,
+    "mel_weight":1
   },
   "data": {
-    "training_files": "datasets/cliped_datasets",
+    "training_files": "datasets/data_v4.jsonl",
     "max_wav_value": 32768.0,
     "sampling_rate": 44100,
     "filter_length": 2048,
@@ -44,7 +46,7 @@
     "num_layers":10, 
     "in_channels":192, 
     "out_channels":384,
-    "in_latent_channels":192, 
+    "in_latent_channels":512, 
     "in_tokens":8193, 
     "dropout":0, 
     "use_fp16":false, 
@@ -52,6 +54,22 @@
     "layer_drop":0.2, 
     "unconditioned_percentage":0.15,
     "g_channels":768
+  },
+  "gpt":{
+    "model_dim":512,
+    "max_mel_tokens":1600,
+    "max_text_tokens":800,
+    "heads":8,
+    "mel_length_compression":2048,
+    "use_mel_codes_as_input":true,
+    "layers":12,
+    "number_text_tokens":256,
+    "number_mel_codes":1026,
+    "start_mel_token":1024,
+    "stop_mel_token":1025,
+    "start_text_token":255,
+    "train_solo_embeddings":false,
+    "spec_channels":1025
   },
   "model": {
     "inter_channels": 192,
