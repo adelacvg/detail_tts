@@ -604,9 +604,10 @@ class SynthesizerTrn(nn.Module):
         self.gpt.post_init_gpt2_config(use_deepspeed=False, kv_cache=False, half=False)
         self.mel_loss_weight = cfg['train']['mel_weight']
         self.text_loss_weight = cfg['train']['text_weight']
-        # self.code_emb.requires_grad_(False)
-        # self.quantizer.requires_grad_(False)
-        # self.diffusion.requires_grad_(False)
+
+        # self.requires_grad_(False)
+        # self.gpt.requires_grad_(True)
+        # self.diffusion.requires_grad_(True)
 
     def forward(self, y, y_lengths, data):
         assert y.shape[-1]%4==0
