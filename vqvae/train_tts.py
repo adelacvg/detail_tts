@@ -104,6 +104,13 @@ class Trainer(object):
             self.logs_folder.mkdir(exist_ok = True, parents=True)
         self.G = SynthesizerTrn(hps.data.filter_length // 2 + 1,hps.train.segment_size // hps.data.hop_length, **hps.model, cfg=hps)
         self.D = MultiPeriodDiscriminator()
+
+        # self.G.requires_grad_(False)
+        # self.G.gpt.requires_grad_(False)
+        # self.G.gpt.requires_grad_(True)
+        # self.G.diffusion.requires_grad_(True)
+        # self.G.dec.requires_grad_(True)
+
         print("G params:", count_parameters(self.G))
         print("D params:", count_parameters(self.D))
         self.G_optimizer = AdamW(self.G.parameters(), hps.train.learning_rate, betas=hps.train.betas, eps=hps.train.eps)
@@ -300,5 +307,5 @@ class Trainer(object):
 
 if __name__ == '__main__':
     trainer = Trainer(cfg_path='vqvae/configs/config.json')
-    trainer.load('/home/hyc/detail_tts/vqvae/logs/2024-06-20-10-06-01/model-154.pt')
+    trainer.load('/home/hyc/detail_tts/vqvae/logs/2024-06-25-00-22-25/model-571.pt')
     trainer.train()
