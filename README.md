@@ -19,7 +19,7 @@ For fine tuning, change the pretrain model load path.
 ## Acknowledgements
 VQ and VITS from [gsv](https://github.com/RVC-Boss/GPT-SoVITS)
 
-GPT and GPT from [tortoise](https://github.com/neonbjb/tortoise-tts)
+Diffusion and GPT from [tortoise](https://github.com/neonbjb/tortoise-tts)
 
 ## Other
 NAR version please check ttts.
