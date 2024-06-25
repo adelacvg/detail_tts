@@ -6,6 +6,7 @@ The model newly proposed three significant important methods to become the best 
 - Both prefixed spk emb and prompt are used to get benefit from both Valle type inference and Tortoise type training.
 
 ## Demo
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/adelacvg/detail_tts/blob/master/demo.ipynb)
 
 ## Inference
 check `api.py`
