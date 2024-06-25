@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
+from vqvae.utils.xtransformers import ContinuousTransformerWrapper, RelativePositionBias
 import glob
 
 def get_paths_with_cache(search_path, cache_path=None):
