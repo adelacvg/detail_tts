@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import autocast
 
-from ttts.utils.utils import normalization, AttentionBlock
+from vqvae.utils.diff_util import normalization, AttentionBlock
 
 
 def is_latent(t):
