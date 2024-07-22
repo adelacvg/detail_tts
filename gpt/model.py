@@ -303,7 +303,7 @@ class UnifiedVoice(nn.Module):
         self.max_conditioning_inputs = max_conditioning_inputs
         self.mel_length_compression = mel_length_compression
         self.conditioning_encoder = MelStyleEncoder(
-            spec_channels, style_vector_dim=model_dim
+            spec_channels, style_vector_dim=model_dim, style_hidden=model_dim//2
         )
         self.text_embedding = nn.Embedding(self.number_text_tokens*types+1, model_dim)
         if use_mel_codes_as_input:
@@ -384,6 +384,7 @@ class UnifiedVoice(nn.Module):
         mel_lengths = torch.div(wav_lengths, self.mel_length_compression, rounding_mode='trunc')
         for b in range(len(mel_lengths)):
             actual_end = mel_lengths[b] + 1  # Due to the convolutional nature of how these tokens are generated, it would be best if the model predicts a token past the actual last token.
+            # print(b,actual_end, mel_input_tokens.shape)
             if actual_end < mel_input_tokens.shape[-1]:
                 mel_input_tokens[b, actual_end:] = self.stop_mel_token
         return mel_input_tokens

@@ -20,8 +20,8 @@ import torch.nn.functional as F
 from torch import nn
 from torch.optim import AdamW
 from accelerate import Accelerator
-from model_tts import SynthesizerTrn, MultiPeriodDiscriminator
-from dataset_tts import TextAudioCollate, TextAudioSpeakerLoader
+from vqvae.model_24k import SynthesizerTrn, MultiPeriodDiscriminator
+from vqvae.dataset_24k import TextAudioCollate, TextAudioSpeakerLoader
 from vqvae.utils.data_utils import spec_to_mel_torch, mel_spectrogram_torch, HParams, spectrogram_torch
 from vqvae.utils import utils
 import vqvae.modules.commons as commons
@@ -84,13 +84,12 @@ class Trainer(object):
         hps = HParams(**self.cfg)
         self.hps = hps
         self.config = hps
-        dataset = TextAudioSpeakerLoader(hps.data.training_files, hps)
+        dataset = TextAudioSpeakerLoader(hps)
         collate_fn = TextAudioCollate()
-        num_workers = 16
         self.dataloader = DataLoader(
             dataset,
             batch_size=hps.train.batch_size,
-            num_workers=num_workers,
+            num_workers=hps.train.num_workers,
             shuffle=False,
             pin_memory=True,
             persistent_workers=True,
@@ -102,7 +101,7 @@ class Trainer(object):
             now = datetime.now()
             self.logs_folder = Path(self.cfg['train']['logs_folder']+'/'+now.strftime("%Y-%m-%d-%H-%M-%S"))
             self.logs_folder.mkdir(exist_ok = True, parents=True)
-        self.G = SynthesizerTrn(hps.data.filter_length // 2 + 1,hps.train.segment_size // hps.data.hop_length, **hps.model, cfg=hps)
+        self.G = SynthesizerTrn(hps.data.filter_length // 2 + 1,hps.train.segment_size // hps.data.hop_length, **hps.vaegan, cfg=hps)
         self.D = MultiPeriodDiscriminator()
 
         # self.G.requires_grad_(False)
@@ -153,7 +152,7 @@ class Trainer(object):
         G = accelerator.unwrap_model(self.G)
         current_model_dict = G.state_dict()
         G_state_dict={k:v if v.size()==current_model_dict[k].size()
-            # and 'quantizer' not in k
+            # and 'diff' not in k
             else  current_model_dict[k] for k,v in zip(current_model_dict.keys(), G_state_dict.values())}
         G.load_state_dict(G_state_dict, strict=False)
         D = accelerator.unwrap_model(self.D)
@@ -250,6 +249,9 @@ class Trainer(object):
                     accelerator.wait_for_everyone()
                     self.G_optimizer.step()
                     accelerator.wait_for_everyone()
+                    
+                    if accelerator.is_main_process:
+                        print(f"vq_loss:{commit_loss:.4f} mel_loss:{loss_mel:.4f} kl_loss:{loss_kl:.4f} diff_loss:{diff_loss:.4f} gpt_loss:{loss_gpt:.4f}")
                     pbar.set_description(f'G_loss:{loss_gen_all:.4f} D_loss:{loss_disc_all:.4f}')
                     if accelerator.is_main_process and self.step % self.val_freq == 0:
                         lr = self.G_optimizer.param_groups[0]["lr"]
@@ -306,6 +308,6 @@ class Trainer(object):
 
 
 if __name__ == '__main__':
-    trainer = Trainer(cfg_path='vqvae/configs/config.json')
-    trainer.load('/home/hyc/detail_tts/vqvae/logs/2024-06-25-00-22-25/model-571.pt')
+    trainer = Trainer(cfg_path='vqvae/configs/config_24k.json')
+    trainer.load('/home/hyc/detail_tts/logs/2024-07-21-01-23-19/model-145.pt')
     trainer.train()

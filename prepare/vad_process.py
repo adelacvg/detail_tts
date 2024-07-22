@@ -20,11 +20,11 @@ def process_file_vad(paths):
     for i in range(0,len(segments)):
         if segments[i].duration_seconds<min_duration or segments[i].duration_seconds > max_duration:
             continue
-        if os.path.exists(os.path.join(out_path, out_prefix, str(i)+'.wav')):
+        if os.path.exists(os.path.join(out_path, out_prefix+'_'+str(i)+'.wav')):
             return 0
-        clip_path = os.path.join(out_path, out_prefix,str(i)+'.wav')
-        if not os.path.exists(os.path.join(out_path, out_prefix)):
-            os.makedirs(os.path.join(out_path, out_prefix),exist_ok=True)
-        segments[i] = segments[i].set_frame_rate(32000)
+        clip_path = os.path.join(out_path, out_prefix+'_'+str(i)+'.wav')
+        # if not os.path.exists(os.path.join(out_path, out_prefix)):
+        #     os.makedirs(os.path.join(out_path, out_prefix),exist_ok=True)
+        segments[i] = segments[i].set_frame_rate(24000)
         segments[i].export(clip_path, format='wav')
     return 0

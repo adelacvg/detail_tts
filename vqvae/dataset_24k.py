@@ -5,9 +5,9 @@ import numpy as np
 import torch
 import torch.utils.data
 
-from utils import utils
-from modules.mel_processing import spectrogram_torch
-from utils.utils import load_filepaths_and_text, load_wav_to_torch
+from vqvae.utils import utils
+from vqvae.modules.mel_processing import spectrogram_torch
+from vqvae.utils.utils import load_filepaths_and_text, load_wav_to_torch
 import torchaudio.functional as F
 from bpe_tokenizers.voice_tokenizer import VoiceBpeTokenizer
 from pypinyin import Style, lazy_pinyin
@@ -46,10 +46,39 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         3) computes spectrograms from audio files.
     """
 
-    def __init__(self, audiopaths, hparams, all_in_mem: bool = False, vol_aug: bool = True):
+    def __init__(self, hparams, all_in_mem: bool = False, vol_aug: bool = True):
         self.tok = VoiceBpeTokenizer('bpe_tokenizers/zh_tokenizer.json')
-        self.jsonl_path = hparams.data.training_files
-        self.audiopaths_and_text = read_jsonl(self.jsonl_path)
+        self.audiopaths_and_text = []
+        # if hparams.train.train_target == 'flowvae':
+        #     self.train_paths = hparams.data.training_files_vae
+        #     with open(self.train_paths, 'r', encoding='utf-8') as f:
+        #         for line in f:
+        #             audiopath = line.strip()
+        #             self.audiopaths_and_text.append({
+        #                 'path':audiopath,
+        #                 'text':"0",
+        #             })
+            # audiopaths = glob.glob(os.path.join(self.train_paths, "**", "*.wav"),recursive=True)
+            # print(audiopaths[0])
+            # self.audiopaths_and_text = [{
+            #     'path':audiopath,
+            #     'text':"0",
+            # } for audiopath in audiopaths]
+            # print(self.audiopaths_and_text[0])
+        # else:
+        self.train_paths = hparams.data.training_files_gpt
+        self.audiopaths_and_text = read_jsonl(self.train_paths)
+        # with open(self.train_paths, 'r', encoding='utf-8') as f:
+        #     for line in f:
+        #         try:
+        #             fields = line.strip().split('|')
+        #             self.audiopaths_and_text.append({
+        #                 'path':fields[0],
+        #                 'text':fields[1],
+        #             })
+        #         except Exception as e:
+        #             continue
+        
         self.hparams = hparams
         self.max_wav_value = hparams.data.max_wav_value
         self.sampling_rate = hparams.data.sampling_rate
@@ -65,30 +94,40 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         # random.shuffle(self.audiopaths_and_text)
         
         self.all_in_mem = all_in_mem
-        if self.all_in_mem:
-            self.cache = [self.get_audio(p[0]) for p in self.audiopaths]
 
     def get_audio(self, path_and_text):
-        audiopath, text = path_and_text['path'][5:], path_and_text['text']
-        text = ' '.join(lazy_pinyin(text, style=Style.TONE3, neutral_tone_with_five=True))
-        text = ' '+text+' '
-        text = self.tok.encode(text)
-        text = torch.LongTensor(text)
-        wav, sr = torchaudio.load(audiopath)
-        if wav.shape[0] > 1:
-            wav = wav[0].unsqueeze(0)
-        wav = F.resample(wav, sr, self.sampling_rate)
-        audio_norm = wav
+        try:
+            audiopath, text = path_and_text['path'], path_and_text['text']
+            raw_text = text
+            text = ' '.join(lazy_pinyin(text, style=Style.TONE3, neutral_tone_with_five=True))
+            text = ' '+text+' '
 
-        # Ideally, all data generated after Mar 25 should have .spec.pt
-        spec = spectrogram_torch(audio_norm, self.filter_length,
-                                    self.sampling_rate, self.hop_length, self.win_length,
-                                    center=False)
-        spec = torch.squeeze(spec, 0)
+            text = self.tok.encode(text)
+            text = torch.LongTensor(text)
+            wav, sr = torchaudio.load(audiopath)
+            # wav = torch.clamp(wav, min=-0.99, max=0.99)
+            if wav.shape[-1]/sr < 0.7 or wav.shape[-1]/sr > 30:
+                print(audiopath)
+                return None,None,None,None
+            if wav.shape[0] > 1:
+                wav = wav[0].unsqueeze(0)
+            wav = F.resample(wav, sr, self.sampling_rate)
+            audio_norm = wav
 
-        return spec, audio_norm, text
+            # Ideally, all data generated after Mar 25 should have .spec.pt
+            spec = spectrogram_torch(audio_norm, self.filter_length,
+                                        self.sampling_rate, self.hop_length, self.win_length,
+                                        center=False)
+            spec = torch.squeeze(spec, 0)
 
-    def random_slice(self, spec, audio_norm, text):
+            return spec, audio_norm, text, raw_text
+        except Exception as e:
+            print(e)
+            return None,None,None,None
+
+    def random_slice(self, spec, audio_norm, text, raw_text):
+        if spec is None:
+            return None
         l = spec.shape[1]//4*4
         spec = spec[:, :l]
         audio_norm = audio_norm[:, :l * self.hop_length]
@@ -102,7 +141,7 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         l = spec.shape[1]//4*4
         spec = spec[:, :l]
         audio_norm = audio_norm[:, :l * self.hop_length]
-        return spec, audio_norm, text, raw_spec, raw_wav
+        return spec, audio_norm, text, raw_spec, raw_wav, raw_text
 
     def __getitem__(self, index):
         try:
@@ -120,6 +159,8 @@ class TextAudioCollate:
 
     def __call__(self, batch):
         batch = [b for b in batch if b is not None]
+        if len(batch) == 0:
+            return None
 
         input_lengths, ids_sorted_decreasing = torch.sort(
             torch.LongTensor([x[0].shape[1] for x in batch]),
@@ -171,6 +212,7 @@ class TextAudioCollate:
             raw_wav = row[4]
             raw_wav_padded[i, :, :raw_wav.size(1)] = raw_wav
             raw_wav_lengths[i] = raw_wav.size(1)
+        raw_text = [x[5] for x in batch]
         return {
             "spec":spec_padded,
             "spec_length":spec_lengths,
@@ -181,5 +223,6 @@ class TextAudioCollate:
             "raw_wav":raw_wav_padded,
             "raw_wav_length":raw_wav_lengths,
             "text":text_padded,
-            "text_length":text_lengths
+            "text_length":text_lengths,
+            # "raw_text":raw_text
         }

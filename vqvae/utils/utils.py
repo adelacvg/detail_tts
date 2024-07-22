@@ -9,7 +9,7 @@ import sys
 import traceback
 from multiprocessing import cpu_count
 
-import faiss
+# import faiss
 import librosa
 import numpy as np
 import torch
