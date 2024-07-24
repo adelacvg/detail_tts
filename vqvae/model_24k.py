@@ -656,7 +656,11 @@ class SynthesizerTrn(nn.Module):
                 return_latent=True, clip_inputs=False).transpose(1,2)
         aligned_conditioning = F.interpolate(aligned_conditioning, size=x_start.shape[-1], mode='nearest')
         conditioning_latent = self.diff_ref_enc(y * y_mask, y_mask)
+        aligned_conditioning = aligned_conditioning * 0.05
         x_start = x_start * 0.18215
+        # print(f"x_start:{torch.min(x_start)} {torch.max(x_start)}")
+        # print(f"conditioning_latent:{torch.min(conditioning_latent)} {torch.max(conditioning_latent)}")
+        # print(f"aligned_conditioning:{torch.min(aligned_conditioning)} {torch.max(aligned_conditioning)}")
         l_diff = self.diffuser.training_losses( 
             model = self.diffusion, 
             x_start = x_start,
@@ -768,6 +772,7 @@ class SynthesizerTrn(nn.Module):
         latent = F.interpolate(latent, size=latent.shape[-1]*4, mode='nearest')
         
         g_diff = self.diff_ref_enc(refer * refer_mask, refer_mask)
+        latent = latent * 0.05
         latent = do_spectrogram_diffusion(self.diffusion, self.infer_diffuser,latent,g_diff,temperature=1.0)
         latent = latent / 0.18215
         y_lengths = torch.LongTensor([latent.shape[-1]]).to(latent.device)
@@ -829,4 +834,3 @@ class SynthesizerTrn(nn.Module):
         # z, m_q, logs_q = self.enc_q(y, y_lengths,g)
         # print(torch.max(x),torch.min(x))
         return codes.squeeze(0).detach(), x.detach()
- 
