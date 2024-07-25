@@ -15,6 +15,7 @@ from vqvae.modules import modules, attentions
 from vqvae.utils.diffusion import SpacedDiffusion, space_timesteps, get_named_beta_schedule
 from vqvae.diff_model import DiffusionTts
 from gpt.model import UnifiedVoice
+from vqvae.modules.dvae import Quantize
 
 from torch.nn import Conv1d, ConvTranspose1d, AvgPool1d, Conv2d
 from torch.nn.utils import weight_norm, remove_weight_norm, spectral_norm
@@ -584,9 +585,6 @@ class SynthesizerTrn(nn.Module):
                            model_var_type='learned_range', loss_type='mse', betas=get_named_beta_schedule('linear', trained_diffusion_steps),
                            conditioning_free=True, conditioning_free_k=cond_free_k, sampler='dpm++2m')
         self.diffusion = DiffusionTts(**cfg['diffusion'])
-        self.diff_ref_enc = modules.MelStyleEncoder(
-            spec_channels, style_vector_dim=gin_channels
-        )
         self.enc_p = nn.ModuleList(self.enc_p)
         self.enc_q = PosteriorEncoder(
             spec_channels, inter_channels, hidden_channels, True,
@@ -655,7 +653,8 @@ class SynthesizerTrn(nn.Module):
                 code, data['raw_wav_length'],
                 return_latent=True, clip_inputs=False).transpose(1,2)
         aligned_conditioning = F.interpolate(aligned_conditioning, size=x_start.shape[-1], mode='nearest')
-        conditioning_latent = self.diff_ref_enc(y * y_mask, y_mask)
+        # print(y.shape)
+        conditioning_latent = self.diffusion.get_conditioning(y)
         aligned_conditioning = aligned_conditioning * 0.05
         x_start = x_start * 0.18215
         # print(f"x_start:{torch.min(x_start)} {torch.max(x_start)}")
@@ -770,10 +769,9 @@ class SynthesizerTrn(nn.Module):
             return_latent=True, clip_inputs=False).transpose(1,2)
         
         latent = F.interpolate(latent, size=latent.shape[-1]*4, mode='nearest')
-        
-        g_diff = self.diff_ref_enc(refer * refer_mask, refer_mask)
+        conditioning_latent = self.diffusion.get_conditioning(refer)
         latent = latent * 0.05
-        latent = do_spectrogram_diffusion(self.diffusion, self.infer_diffuser,latent,g_diff,temperature=1.0)
+        latent = do_spectrogram_diffusion(self.diffusion, self.infer_diffuser,latent,conditioning_latent,temperature=1.0)
         latent = latent / 0.18215
         y_lengths = torch.LongTensor([latent.shape[-1]]).to(latent.device)
         y_mask = torch.unsqueeze(
