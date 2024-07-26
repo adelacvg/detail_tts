@@ -135,9 +135,9 @@ class DiffusionTts(nn.Module):
     def __init__(
             self,
             model_channels=512,
+            g_channels=768,
             num_layers=8,
             in_channels=100,
-            g_channels=1025,
             in_latent_channels=512,
             in_tokens=8193,
             out_channels=200,  # mean and variance
@@ -170,12 +170,6 @@ class DiffusionTts(nn.Module):
         # This model is meant to be able to be trained on both for efficiency purposes - it is far less computationally
         # complex to generate tokens, while generating latents will normally mean propagating through a deep autoregressive
         # transformer network.
-        self.code_embedding = nn.Embedding(in_tokens, model_channels)
-        self.code_converter = nn.Sequential(
-            AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True),
-            AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True),
-            AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True),
-        )
         self.code_norm = normalization(model_channels)
         self.latent_conditioner = nn.Sequential(
             nn.Conv1d(in_latent_channels, model_channels, 3, padding=1),
@@ -184,20 +178,14 @@ class DiffusionTts(nn.Module):
             AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True),
             AttentionBlock(model_channels, num_heads, relative_pos_embeddings=True),
         )
-        self.contextual_embedder = nn.Sequential(nn.Conv1d(g_channels,model_channels,3,padding=1,stride=2),
-                                                 nn.Conv1d(model_channels, model_channels*2,3,padding=1,stride=2),
-                                                 AttentionBlock(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
-                                                 AttentionBlock(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
-                                                 AttentionBlock(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
-                                                 AttentionBlock(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False),
-                                                 AttentionBlock(model_channels*2, num_heads, relative_pos_embeddings=True, do_checkpoint=False))
         self.unconditioned_embedding = nn.Parameter(torch.randn(1,model_channels,1))
         self.conditioning_timestep_integrator = TimestepEmbedSequential(
             DiffusionLayer(model_channels, dropout, num_heads),
             DiffusionLayer(model_channels, dropout, num_heads),
             DiffusionLayer(model_channels, dropout, num_heads),
         )
-
+        self.g_proj = nn.Linear(g_channels, model_channels*2)
+        self.g_norm = normalization(model_channels*2)
         self.integrating_conv = nn.Conv1d(model_channels*2, model_channels, kernel_size=1)
         self.mel_head = nn.Conv1d(model_channels, in_channels, kernel_size=3, padding=1)
 
@@ -212,35 +200,20 @@ class DiffusionTts(nn.Module):
 
     def get_grad_norm_parameter_groups(self):
         groups = {
-            'minicoder': list(self.contextual_embedder.parameters()),
             'layers': list(self.layers.parameters()),
-            'code_converters': list(self.code_embedding.parameters()) + list(self.code_converter.parameters()) + list(self.latent_conditioner.parameters()) + list(self.latent_conditioner.parameters()),
             'timestep_integrator': list(self.conditioning_timestep_integrator.parameters()) + list(self.integrating_conv.parameters()),
             'time_embed': list(self.time_embed.parameters()),
         }
         return groups
 
-    def get_conditioning(self, conditioning_input):
-        speech_conditioning_input = conditioning_input.unsqueeze(1) if len(
-            conditioning_input.shape) == 3 else conditioning_input
-        conds = []
-        for j in range(speech_conditioning_input.shape[1]):
-            conds.append(self.contextual_embedder(speech_conditioning_input[:, j]))
-        conds = torch.cat(conds, dim=-1)
-        conds = conds.mean(dim=-1)
-        return conds
-
     def timestep_independent(self, aligned_conditioning, conditioning_latent, expected_seq_len, return_code_pred):
         # Shuffle aligned_latent to BxCxS format
-        # if is_latent(aligned_conditioning):
-        #     aligned_conditioning = aligned_conditioning.permute(0, 2, 1)
-
+        conditioning_latent = self.g_proj(conditioning_latent.squeeze(-1))
+        conditioning_latent = self.g_norm(conditioning_latent)
+        
         cond_scale, cond_shift = torch.chunk(conditioning_latent, 2, dim=1)
-        if is_latent(aligned_conditioning):
-            code_emb = self.latent_conditioner(aligned_conditioning)
-        else:
-            code_emb = self.code_embedding(aligned_conditioning).permute(0, 2, 1)
-            code_emb = self.code_converter(code_emb)
+        code_emb = self.latent_conditioner(aligned_conditioning)
+
         code_emb = self.code_norm(code_emb) * (1 + cond_scale.unsqueeze(-1)) + cond_shift.unsqueeze(-1)
 
         unconditioned_batches = torch.zeros((code_emb.shape[0], 1, 1), device=code_emb.device)
@@ -278,21 +251,16 @@ class DiffusionTts(nn.Module):
         unused_params = []
         if conditioning_free:
             code_emb = self.unconditioned_embedding.repeat(x.shape[0], 1, x.shape[-1])
-            unused_params.extend(list(self.code_converter.parameters()) + list(self.code_embedding.parameters()))
             unused_params.extend(list(self.latent_conditioner.parameters()))
         else:
             if precomputed_aligned_embeddings is not None:
                 code_emb = precomputed_aligned_embeddings
             else:
                 code_emb, mel_pred = self.timestep_independent(aligned_conditioning, conditioning_latent, x.shape[-1], True)
-                if is_latent(aligned_conditioning):
-                    unused_params.extend(list(self.code_converter.parameters()) + list(self.code_embedding.parameters()))
-                else:
-                    unused_params.extend(list(self.latent_conditioner.parameters()))
 
             unused_params.append(self.unconditioned_embedding)
         unused_params.extend(list(self.mel_head.parameters()))
-        
+
         time_emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
         code_emb = self.conditioning_timestep_integrator(code_emb, time_emb)
         x = self.inp_block(x)
@@ -332,6 +300,8 @@ if __name__ == '__main__':
     ts = torch.LongTensor([600, 600])
     model = DiffusionTts(512, layer_drop=.3, unconditioned_percentage=.5)
     # Test with latent aligned conditioning
-    #o = model(clip, ts, aligned_latent, cond)
+    o = model(clip, ts, aligned_latent, cond)
+    # print(o)
     # Test with sequence aligned conditioning
-    o = model(clip, ts, aligned_sequence, cond)
+    # o = model(clip, ts, aligned_sequence, cond)
+    self.code_norm = normalization(model_channels)
