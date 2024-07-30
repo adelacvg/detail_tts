@@ -120,28 +120,25 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
                                         center=False)
             spec = torch.squeeze(spec, 0)
 
-            return spec, audio_norm, text, raw_text
+            return spec, audio_norm, text, raw_text, audiopath
         except Exception as e:
             print(e)
             return None,None,None,None
 
-    def random_slice(self, spec, audio_norm, text, raw_text):
+    def random_slice(self, spec, audio_norm, text, raw_text, audiopath):
         if spec is None:
             return None
-        l = spec.shape[1]//4*4
+        l = min(spec.shape[1]//4*4, audio_norm.shape[-1]//self.hop_length)
         spec = spec[:, :l]
         audio_norm = audio_norm[:, :l * self.hop_length]
         raw_spec = spec
         raw_wav = audio_norm
         if spec.shape[1] > 800:
             start = random.randint(0, spec.shape[1]-800)
-            end = start + 790
+            end = start + 788
             spec = spec[:, start:end]
             audio_norm = audio_norm[:, start * self.hop_length : end * self.hop_length]
-        l = spec.shape[1]//4*4
-        spec = spec[:, :l]
-        audio_norm = audio_norm[:, :l * self.hop_length]
-        return spec, audio_norm, text, raw_spec, raw_wav, raw_text
+        return spec, audio_norm, text, raw_spec, raw_wav, raw_text, audiopath
 
     def __getitem__(self, index):
         try:
@@ -213,6 +210,7 @@ class TextAudioCollate:
             raw_wav_padded[i, :, :raw_wav.size(1)] = raw_wav
             raw_wav_lengths[i] = raw_wav.size(1)
         raw_text = [x[5] for x in batch]
+        audiopath = [x[6] for x in batch]
         return {
             "spec":spec_padded,
             "spec_length":spec_lengths,

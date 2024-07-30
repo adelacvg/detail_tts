@@ -309,5 +309,5 @@ class Trainer(object):
 
 if __name__ == '__main__':
     trainer = Trainer(cfg_path='vqvae/configs/config_24k.json')
-    # trainer.load('')
+    # trainer.load('/home/hyc/detail_tts/logs/2024-07-26-10-31-51/model-319.pt')
     trainer.train()
