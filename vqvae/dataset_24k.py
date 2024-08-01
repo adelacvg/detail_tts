@@ -14,6 +14,7 @@ from pypinyin import Style, lazy_pinyin
 import torchaudio
 import glob
 import json
+from tqdm import tqdm
 
 # import h5py
 
@@ -78,7 +79,6 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         #             })
         #         except Exception as e:
         #             continue
-        
         self.hparams = hparams
         self.max_wav_value = hparams.data.max_wav_value
         self.sampling_rate = hparams.data.sampling_rate

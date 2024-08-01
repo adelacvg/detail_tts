@@ -185,7 +185,7 @@ class DiffusionTts(nn.Module):
             DiffusionLayer(model_channels, dropout, num_heads),
         )
         self.g_proj = nn.Linear(g_channels, model_channels*2)
-        self.g_norm = normalization(model_channels*2)
+        # self.g_norm = normalization(model_channels*2)
         self.integrating_conv = nn.Conv1d(model_channels*2, model_channels, kernel_size=1)
         self.mel_head = nn.Conv1d(model_channels, in_channels, kernel_size=3, padding=1)
 
@@ -209,7 +209,7 @@ class DiffusionTts(nn.Module):
     def timestep_independent(self, aligned_conditioning, conditioning_latent, expected_seq_len, return_code_pred):
         # Shuffle aligned_latent to BxCxS format
         conditioning_latent = self.g_proj(conditioning_latent.squeeze(-1))
-        conditioning_latent = self.g_norm(conditioning_latent)
+        # conditioning_latent = self.g_norm(conditioning_latent)
         
         cond_scale, cond_shift = torch.chunk(conditioning_latent, 2, dim=1)
         code_emb = self.latent_conditioner(aligned_conditioning)
@@ -223,6 +223,7 @@ class DiffusionTts(nn.Module):
                                                device=code_emb.device) < self.unconditioned_percentage
             code_emb = torch.where(unconditioned_batches, self.unconditioned_embedding.repeat(aligned_conditioning.shape[0], 1, 1),
                                    code_emb)
+        # print(code_emb.shape, expected_seq_len)
         expanded_code_emb = F.interpolate(code_emb, size=expected_seq_len, mode='nearest')
 
         if not return_code_pred:
