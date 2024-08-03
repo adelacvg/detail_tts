@@ -651,7 +651,7 @@ class SynthesizerTrn(nn.Module):
                 data['text'], data['text_length'],
                 code, data['raw_wav_length'],
                 return_latent=True, clip_inputs=False).transpose(1,2)
-        conditioning_latent = g
+        conditioning_latent = g.detach()
         x_start = x_start * 0.18215
         l_diff = self.diffuser.training_losses( 
             model = self.diffusion, 
