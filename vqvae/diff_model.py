@@ -184,7 +184,7 @@ class DiffusionTts(nn.Module):
             DiffusionLayer(model_channels, dropout, num_heads),
             DiffusionLayer(model_channels, dropout, num_heads),
         )
-        self.g_proj = nn.Linear(g_channels, model_channels*2)
+        self.g_proj = nn.Linear(g_channels, model_channels)
         # self.g_norm = normalization(model_channels*2)
         self.integrating_conv = nn.Conv1d(model_channels*2, model_channels, kernel_size=1)
         self.mel_head = nn.Conv1d(model_channels, in_channels, kernel_size=3, padding=1)
@@ -211,10 +211,10 @@ class DiffusionTts(nn.Module):
         conditioning_latent = self.g_proj(conditioning_latent.squeeze(-1))
         # conditioning_latent = self.g_norm(conditioning_latent)
         
-        cond_scale, cond_shift = torch.chunk(conditioning_latent, 2, dim=1)
+        # cond_scale, cond_shift = torch.chunk(conditioning_latent, 2, dim=1)
         code_emb = self.latent_conditioner(aligned_conditioning)
-
-        code_emb = self.code_norm(code_emb) * (1 + cond_scale.unsqueeze(-1)) + cond_shift.unsqueeze(-1)
+        
+        code_emb = self.code_norm(code_emb) + conditioning_latent.unsqueeze(-1)
 
         unconditioned_batches = torch.zeros((code_emb.shape[0], 1, 1), device=code_emb.device)
         # Mask out the conditioning branch for whole batch elements, implementing something similar to classifier-free guidance.
