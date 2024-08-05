@@ -30,16 +30,16 @@ from prepare.load_infer import load_model
 import torchaudio
 from vqvae.utils.data_utils import spectrogram_torch,HParams
 # device = 'gpu:0'
-vqvae = load_model('vqvae', MODELS['vqvae.pth'], 'vqvae/configs/config.json', device)
+vqvae = load_model('vqvae', MODELS['vqvae.pth'], 'vqvae/configs/config_24k.json', device)
 audio,sr = torchaudio.load(cond_audio)
 if audio.shape[0]>1:
     audio = audio[0].unsqueeze(0)
-audio = torchaudio.transforms.Resample(sr,44100)(audio)
-hps = HParams(**json.load(open('vqvae/configs/config.json')))
+audio = torchaudio.transforms.Resample(sr,24000)(audio)
+hps = HParams(**json.load(open('vqvae/configs/config_24k.json')))
 spec = spectrogram_torch(audio, hps.data.filter_length,
     hps.data.hop_length, hps.data.win_length, center=False).to(device)
 spec_lengths = torch.LongTensor([spec.shape[-1]]).to(device)
 text_lengths = torch.LongTensor([text_tokens.shape[-1]])
 with torch.no_grad():
     wav = vqvae.infer(text_tokens, text_lengths, spec, spec_lengths)
-torchaudio.save('gen.wav', wav.squeeze(0).cpu(), 44100)
+torchaudio.save('gen.wav', wav.squeeze(0).cpu(), 24000)

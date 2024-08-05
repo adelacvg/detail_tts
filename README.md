@@ -6,6 +6,8 @@ The model newly proposed three significant important methods to become the best 
 - All in one model. The model contains gpt, diffusion, vqvae, gan and flowvae all in one. One train one inference.
 - Both prefixed spk emb and prompt are used to get benefit from both Valle type inference and Tortoise type training.
 
+![image](arch.png)
+
 ## Inference
 
 check `api.py`
