@@ -89,9 +89,22 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         self.sampling_rate = hparams.data.sampling_rate
         self.use_sr = hparams.train.use_sr
         self.spec_len = hparams.train.max_speclen
+        
+#         audiopaths_and_text_new = []
+#         skipped_dur=0
+#         for audiopath in tqdm(self.audiopaths_and_text):
+#             size = os.path.getsize(audiopath['path'])
+#             duration = size / self.sampling_rate / 2
 
+#             if 10 > duration > 0.7:
+#                 audiopaths_and_text_new.append(audiopath)
+#             else:
+#                 skipped_dur += 1
+#                 continue
+#         print(f"skipped_dur:{skipped_dur}")
+#         self.audiopaths_and_text = audiopaths_and_text_new
         random.seed(1234)
-        # random.shuffle(self.audiopaths_and_text)
+        random.shuffle(self.audiopaths_and_text)
         
         self.all_in_mem = all_in_mem
 
@@ -106,7 +119,7 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
             text = torch.LongTensor(text)
             wav, sr = torchaudio.load(audiopath)
             # wav = torch.clamp(wav, min=-0.99, max=0.99)
-            if wav.shape[-1]/sr < 0.7 or wav.shape[-1]/sr > 30:
+            if wav.shape[-1]/sr < 0.69 or wav.shape[-1]/sr > 30.1:
                 print(audiopath)
                 return None,None,None,None
             if wav.shape[0] > 1:
@@ -128,7 +141,7 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
     def random_slice(self, spec, audio_norm, text, raw_text, audiopath):
         if spec is None:
             return None
-        l = min(spec.shape[1]//4*4, audio_norm.shape[-1]//self.hop_length)
+        l = min(spec.shape[1]//4*4, audio_norm.shape[-1]//self.hop_length//4*4)
         spec = spec[:, :l]
         audio_norm = audio_norm[:, :l * self.hop_length]
         raw_spec = spec
@@ -156,11 +169,12 @@ class TextAudioCollate:
 
     def __call__(self, batch):
         batch = [b for b in batch if b is not None]
+        # batch = batch[8:12]
         if len(batch) == 0:
             return None
 
         input_lengths, ids_sorted_decreasing = torch.sort(
-            torch.LongTensor([x[0].shape[1] for x in batch]),
+            torch.LongTensor([x[3].shape[1] for x in batch]),
             dim=0, descending=True)
 
         max_spec_len = max([x[0].size(1) for x in batch])

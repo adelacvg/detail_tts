@@ -1,10 +1,11 @@
 {
   "train": {
+    "target":"flowvae",
     "ssl": false,
     "val_freq": 100,
     "save_freq": 1000,
     "seed": 1234,
-    "train_steps": 1000000,
+    "train_steps": 10000000,
     "logs_folder":"logs",
     "learning_rate": 0.0001,
     "betas": [
@@ -13,7 +14,7 @@
     ],
     "eps": 1e-09,
     "batch_size": 16,
-    "gradient_accumulate_every": 1,
+    "gradient_accumulate_every": 8,
     "fp16_run": false,
     "half_type": "fp16",
     "lr_decay": 0.999875,
@@ -25,7 +26,7 @@
     "use_sr": true,
     "max_speclen": 512,
     "port": "8001",
-    "num_workers": 4,
+    "num_workers": 16,
     "keep_ckpts": 3,
     "all_in_mem": false,
     "vol_aug": false,
@@ -33,7 +34,7 @@
     "mel_weight":1
   },
   "data": {
-    "training_files_gpt": "datasets/aishell3.jsonl",
+    "training_files_gpt": "datasets/podcast.jsonl",
     "max_wav_value": 32768.0,
     "sampling_rate": 24000,
     "filter_length": 1024,
@@ -45,11 +46,11 @@
     "unit_interpolate_mode": "nearest"
   },
   "diffusion":{
-    "model_channels":1024,
-    "num_layers":8, 
+    "model_channels":768,
+    "num_layers":10,
     "in_channels":192, 
     "out_channels":384,
-    "in_latent_channels":1024, 
+    "in_latent_channels":768, 
     "in_tokens":8193, 
     "dropout":0, 
     "use_fp16":false, 
@@ -59,7 +60,7 @@
     "g_channels":768
   },
   "gpt":{
-    "model_dim":1024,
+    "model_dim":768,
     "max_mel_tokens":1600,
     "max_text_tokens":800,
     "heads":16,
@@ -77,7 +78,7 @@
   "vaegan": {
     "inter_channels": 192,
     "hidden_channels": 192,
-    "filter_channels": 768,
+    "filter_channels": 512,
     "vq_bins": 8192,
     "n_heads": 4,
     "n_layers": 3,

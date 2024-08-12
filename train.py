@@ -29,6 +29,7 @@ import torchaudio
 from vqvae.modules.losses import generator_loss, discriminator_loss, feature_loss, kl_loss
 from torchaudio.functional import phase_vocoder, resample, spectrogram
 from torchaudio import transforms
+
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = False
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -109,6 +110,8 @@ class Trainer(object):
         # self.G.gpt.requires_grad_(True)
         # self.G.diffusion.requires_grad_(True)
         # self.G.dec.requires_grad_(True)
+        if self.hps.train.target in ['gpt','diff','vqvae']:
+            self.D.requires_grad_(False)
 
         print("G params:", count_parameters(self.G))
         print("D params:", count_parameters(self.D))
@@ -123,9 +126,10 @@ class Trainer(object):
         )
         self.G, self.G_optimizer, self.D, self.D_optimizer, self.dataloader, self.scheduler_g, self.scheduler_d = self.accelerator.prepare(
             self.G, self.G_optimizer, self.D, self.D_optimizer, self.dataloader, self.scheduler_g, self.scheduler_d)
+        self.dataloader = cycle(self.dataloader)
         self.step=0
         self.epoch=1
-        self.gradient_accumulate_every=1
+        self.gradient_accumulate_every=self.hps.train.gradient_accumulate_every
         # self.aug = Augment(hps)
     def save(self, milestone):
         if not self.accelerator.is_local_main_process:
@@ -176,15 +180,55 @@ class Trainer(object):
         for _ in range(self.epoch):
             self.scheduler_g.step()
             self.scheduler_d.step()
+        # cnt=0
+        # for data in self.dataloader:
+        #     cnt+=1
+        #     print(cnt)
+        #     if cnt>45000:
+        #         break
         with tqdm(initial = self.step, total = self.train_steps, disable = not accelerator.is_main_process) as pbar:
             while self.step < self.train_steps:
-                self.dataloader.batch_sampler.epoch=epoch
-                for data in self.dataloader:
+                # self.dataloader.batch_sampler.epoch=epoch
+                # for data in self.dataloader:
+                
+                # data = next(self.dataloader)
+                # for d in data:
+                #     data[d] = data[d].to(device)
+                # spec, y, spec_length, wav = data['spec'],data['wav'],data['spec_length'],data['raw_wav']
+                
+                # with torch.autograd.detect_anomaly():
+                if self.hps.train.target in ['vqvae','gpt','diff']:
+                    total_loss = 0.
+                    for _ in range(self.gradient_accumulate_every):
+                        data = next(self.dataloader)
+                        for d in data:
+                            data[d] = data[d].to(device)
+                        spec, y, spec_length, wav = data['spec'],data['wav'],data['spec_length'],data['raw_wav']
+                        with self.accelerator.autocast():
+                            loss = self.G(spec, spec_length,data=data)
+                            loss = loss / self.gradient_accumulate_every
+                            total_loss += loss.item()
+                        self.accelerator.backward(loss)
+                    grad_norm = get_grad_norm(self.G)
+                    accelerator.clip_grad_norm_(self.G.parameters(), 1.0)
+                    pbar.set_description(f'{self.hps.train.target}_loss: {total_loss:.4f}')
+                    accelerator.wait_for_everyone()
+                    self.G_optimizer.step()
+                    self.G_optimizer.zero_grad()
+                    accelerator.wait_for_everyone()
+                    if accelerator.is_main_process and self.step % self.val_freq == 0 and self.hps.train.target == 'diff':
+                        eval_model = self.accelerator.unwrap_model(self.G)
+                        eval_model.eval()
+                        with torch.no_grad():
+                            wav_eval = eval_model.infer(data['text'], data['text_length'], spec, spec_length)
+                        eval_model.train()
+                        milestone = self.step // self.cfg['train']['save_freq'] 
+                        torchaudio.save(str(self.logs_folder / f'sample-{milestone}.wav'), wav_eval[0].detach().cpu(), hps.data.sampling_rate)
+                elif self.hps.train.target=='flowvae':
+                    data = next(self.dataloader)
                     for d in data:
                         data[d] = data[d].to(device)
-                    spec, y, spec_length = data['spec'],data['wav'],data['spec_length']
-                    wav = data['raw_wav']
-                    # with torch.autograd.detect_anomaly():
+                    spec, y, spec_length, wav = data['spec'],data['wav'],data['spec_length'],data['raw_wav']
                     with self.accelerator.autocast():
                         y_hat, diff_loss, loss_gpt, commit_loss, ids_slice, z_mask,\
                         (z, z_p, m_p, logs_p, m_q, logs_q),\
@@ -224,7 +268,82 @@ class Trainer(object):
                     accelerator.wait_for_everyone()
                     self.D_optimizer.step()
                     accelerator.wait_for_everyone()
-                    
+
+                    # Generator
+                    with self.accelerator.autocast():
+                        y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.D(y, y_hat)
+                    loss_mel = F.l1_loss(y_mel, y_hat_mel) * 45
+                    loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask)
+                    loss_fm = feature_loss(fmap_r, fmap_g)
+                    loss_gen, losses_gen = generator_loss(y_d_hat_g)
+                    loss_gen_all = loss_gen + loss_fm + loss_mel \
+                        + loss_kl + commit_loss + diff_loss + loss_gpt
+                    # print(loss_gen, loss_fm, loss_mel, loss_kl, commit_loss, diff_loss, loss_gpt)
+                    self.G_optimizer.zero_grad()
+                    self.accelerator.backward(loss_gen_all)
+
+                    grad_norm_g = commons.clip_grad_value_(self.G.parameters(), None)
+                    get_grad_norm(self.G)
+                    accelerator.wait_for_everyone()
+                    self.G_optimizer.step()
+                    accelerator.wait_for_everyone()
+                    pbar.set_description(f'mel_loss:{loss_mel:.4f} kl_loss:{loss_kl:.4f}')
+                    #infer flowvae
+                    if accelerator.is_main_process and self.step % self.val_freq == 0:
+                        eval_model = self.accelerator.unwrap_model(self.G)
+                        eval_model.eval()
+                        with torch.no_grad():
+                            wav_eval = eval_model.infer_flowvae(data['raw_spec'], data['raw_spec_length'],data=data)
+                        eval_model.train()
+                        milestone = self.step // self.cfg['train']['save_freq']
+                        # print(data['raw_spec_length'],data['raw_wav_length'],wav_eval[0].shape[-1])
+                        torchaudio.save(str(self.logs_folder / f'sample-{milestone}.wav'), wav_eval[0].detach().cpu(), hps.data.sampling_rate)
+                        # torchaudio.save(str(self.logs_folder / f'raw-{milestone}.wav'), data['raw_wav'][0].detach().cpu(), hps.data.sampling_rate)
+                else:
+                    data = next(self.dataloader)
+                    for d in data:
+                        data[d] = data[d].to(device)
+                    spec, y, spec_length, wav = data['spec'],data['wav'],data['spec_length'],data['raw_wav']
+                    with self.accelerator.autocast():
+                        y_hat, diff_loss, loss_gpt, commit_loss, ids_slice, z_mask,\
+                        (z, z_p, m_p, logs_p, m_q, logs_q),\
+                        latent = self.G(spec, spec_length,data=data)
+                        mel = spec_to_mel_torch(
+                            spec,
+                            hps.data.filter_length,
+                            hps.data.n_mel_channels,
+                            hps.data.sampling_rate,
+                            hps.data.mel_fmin,
+                            hps.data.mel_fmax,
+                        )
+                        y_mel = commons.slice_segments(
+                            mel, ids_slice, hps.train.segment_size // hps.data.hop_length
+                        )
+                        y_hat_mel = mel_spectrogram_torch(
+                            y_hat.squeeze(1),
+                            hps.data.filter_length,
+                            hps.data.n_mel_channels,
+                            hps.data.sampling_rate,
+                            hps.data.hop_length,
+                            hps.data.win_length,
+                            hps.data.mel_fmin,
+                            hps.data.mel_fmax,
+                        )
+
+                        y = commons.slice_segments(y, ids_slice * hps.data.hop_length, hps.train.segment_size)  # slice
+                        # Discriminator
+                        y_d_hat_r, y_d_hat_g, _, _ = self.D(y, y_hat.detach())
+                    loss_disc, losses_disc_r, losses_disc_g = discriminator_loss(
+                        y_d_hat_r, y_d_hat_g
+                    )
+                    loss_disc_all = loss_disc
+                    self.D_optimizer.zero_grad()
+                    self.accelerator.backward(loss_disc_all)
+                    grad_norm_d = commons.clip_grad_value_(self.D.parameters(), None)
+                    accelerator.wait_for_everyone()
+                    self.D_optimizer.step()
+                    accelerator.wait_for_everyone()
+
                     # unused_params =[]
                     # G_ = self.accelerator.unwrap_model(self.G)
                     # unused_params.extend(list(G_.quantized_detail_enc.parameters()))
@@ -240,7 +359,7 @@ class Trainer(object):
                     loss_gen, losses_gen = generator_loss(y_d_hat_g)
                     loss_gen_all = loss_gen + loss_fm + loss_mel \
                         + loss_kl + commit_loss + diff_loss + loss_gpt
-
+                    # print(loss_gen, loss_fm, loss_mel, loss_kl, commit_loss, diff_loss, loss_gpt)
                     self.G_optimizer.zero_grad()
                     self.accelerator.backward(loss_gen_all)
 
@@ -249,7 +368,7 @@ class Trainer(object):
                     accelerator.wait_for_everyone()
                     self.G_optimizer.step()
                     accelerator.wait_for_everyone()
-                    
+
                     if accelerator.is_main_process:
                         print(f"vq_loss:{commit_loss:.4f} mel_loss:{loss_mel:.4f} kl_loss:{loss_kl:.4f} diff_loss:{diff_loss:.4f} gpt_loss:{loss_gpt:.4f}")
                     pbar.set_description(f'G_loss:{loss_gen_all:.4f} D_loss:{loss_disc_all:.4f}')
@@ -260,6 +379,8 @@ class Trainer(object):
                         with torch.no_grad():
                             wav_eval = eval_model.infer(data['text'], data['text_length'], spec, spec_length)
                         eval_model.train()
+                        milestone = self.step // self.cfg['train']['save_freq'] 
+                        torchaudio.save(str(self.logs_folder / f'sample-{milestone}.wav'), wav_eval[0].detach().cpu(), hps.data.sampling_rate)
                         scalar_dict = {
                                 "gen/loss_gen_all": loss_gen_all,
                                 "gen/loss_gen":loss_gen,
@@ -284,8 +405,6 @@ class Trainer(object):
                             'wav/gt':wav[0,0,:].detach().cpu(),
                             'wav/pred':wav_eval[0].detach().cpu()
                         }
-                        milestone = self.step // self.cfg['train']['save_freq'] 
-                        torchaudio.save(str(self.logs_folder / f'sample-{milestone}.wav'), wav_eval[0].detach().cpu(), hps.data.sampling_rate)
                         summarize(
                             writer=writer,
                             global_step=self.step,
@@ -294,20 +413,21 @@ class Trainer(object):
                             scalars=scalar_dict,
                             audio_sampling_rate=hps.data.sampling_rate
                         )
-                    if accelerator.is_main_process and self.step % self.cfg['train']['save_freq']==0:
-                        keep_ckpts = self.cfg['train']['keep_ckpts']
-                        if keep_ckpts > 0:
-                            clean_checkpoints(path_to_models=self.logs_folder, n_ckpts_to_keep=keep_ckpts, sort_by_time=True)
-                        self.save(self.step//1000)
-                    self.step += 1
-                    pbar.update(1)
-                self.scheduler_g.step()
-                self.scheduler_d.step()
-                epoch = epoch + 1
+                if accelerator.is_main_process and self.step % self.cfg['train']['save_freq']==0:
+                    keep_ckpts = self.cfg['train']['keep_ckpts']
+                    if keep_ckpts > 0:
+                        clean_checkpoints(path_to_models=self.logs_folder, n_ckpts_to_keep=keep_ckpts, sort_by_time=True)
+                    self.save(self.step//1000)
+                self.step += 1
+                pbar.update(1)
+                if self.step%10000==0:
+                    self.scheduler_g.step()
+                    self.scheduler_d.step()
+                    epoch = epoch + 1
         accelerator.print('training complete')
 
 
 if __name__ == '__main__':
     trainer = Trainer(cfg_path='vqvae/configs/config_24k.json')
-    # trainer.load('/home/hyc/detail_tts/logs/2024-07-26-10-31-51/model-319.pt')
+    trainer.load('/home/hyc/detail_tts/logs/2024-08-12-16-15-51/model-16.pt')
     trainer.train()
