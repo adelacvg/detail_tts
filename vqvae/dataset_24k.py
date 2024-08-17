@@ -6,7 +6,7 @@ import torch
 import torch.utils.data
 
 from vqvae.utils import utils
-from vqvae.modules.mel_processing import spectrogram_torch
+from vqvae.modules.mel_processing import spectrogram_torch, spec_to_mel_torch
 from vqvae.utils.utils import load_filepaths_and_text, load_wav_to_torch
 import torchaudio.functional as F
 from bpe_tokenizers.voice_tokenizer import VoiceBpeTokenizer
@@ -89,7 +89,9 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         self.sampling_rate = hparams.data.sampling_rate
         self.use_sr = hparams.train.use_sr
         self.spec_len = hparams.train.max_speclen
-        
+        self.n_mel_channels = hparams.data.n_mel_channels
+        self.mel_fmin = hparams.data.mel_fmin
+        self.mel_fmax = hparams.data.mel_fmax
 #         audiopaths_and_text_new = []
 #         skipped_dur=0
 #         for audiopath in tqdm(self.audiopaths_and_text):
@@ -131,27 +133,42 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
             spec = spectrogram_torch(audio_norm, self.filter_length,
                                         self.sampling_rate, self.hop_length, self.win_length,
                                         center=False)
+            mel = spec_to_mel_torch(
+                            spec,
+                            self.filter_length,
+                            self.n_mel_channels,
+                            self.sampling_rate,
+                            self.mel_fmin,
+                            self.mel_fmax,
+                        )
             spec = torch.squeeze(spec, 0)
+            mel = torch.squeeze(mel,0)
 
-            return spec, audio_norm, text, raw_text, audiopath
+            return spec, audio_norm, text, raw_text, audiopath, mel
         except Exception as e:
             print(e)
             return None,None,None,None
 
-    def random_slice(self, spec, audio_norm, text, raw_text, audiopath):
+    def random_slice(self, spec, audio_norm, text, raw_text, audiopath, mel):
         if spec is None:
             return None
         l = min(spec.shape[1]//4*4, audio_norm.shape[-1]//self.hop_length//4*4)
         spec = spec[:, :l]
+        mel = mel[:, :l]
         audio_norm = audio_norm[:, :l * self.hop_length]
         raw_spec = spec
         raw_wav = audio_norm
+        raw_mel =  mel
         if spec.shape[1] > 800:
             start = random.randint(0, spec.shape[1]-800)
             end = start + 788
             spec = spec[:, start:end]
+            mel = mel[:, start:end]
             audio_norm = audio_norm[:, start * self.hop_length : end * self.hop_length]
-        return spec, audio_norm, text, raw_spec, raw_wav, raw_text, audiopath
+        # l = min(spec.shape[1]//4*4, audio_norm.shape[-1]//self.hop_length)
+        # spec = spec[:, :l]
+        # audio_norm = audio_norm[:, :l * self.hop_length]
+        return spec, audio_norm, text, raw_spec, raw_wav, raw_text, audiopath, mel, raw_mel
 
     def __getitem__(self, index):
         try:
@@ -188,6 +205,8 @@ class TextAudioCollate:
         text_padded = torch.LongTensor(len(batch), max_text_len)
         raw_spec_padded = torch.FloatTensor(len(batch), batch[0][0].shape[0], max_raw_spec_len)
         raw_wav_padded = torch.FloatTensor(len(batch), 1, max_raw_wav_len)
+        mel_padded = torch.FloatTensor(len(batch), batch[0][7].shape[0], max_spec_len)
+        raw_mel_padded = torch.FloatTensor(len(batch), batch[0][8].shape[0], max_raw_spec_len)
 
         spec_lengths = torch.LongTensor(len(batch))
         text_lengths = torch.LongTensor(len(batch))
@@ -200,6 +219,8 @@ class TextAudioCollate:
         text_padded.zero_()
         raw_spec_padded.zero_()
         raw_wav_padded.zero_()
+        mel_padded.zero_()
+        raw_mel_padded.zero_()
 
         for i in range(len(ids_sorted_decreasing)):
             row = batch[ids_sorted_decreasing[i]]
@@ -223,13 +244,24 @@ class TextAudioCollate:
             raw_wav = row[4]
             raw_wav_padded[i, :, :raw_wav.size(1)] = raw_wav
             raw_wav_lengths[i] = raw_wav.size(1)
+            
+            mel = row[7]
+            mel_padded[i, :, :mel.size(1)] = mel
+            
+            raw_mel = row[8]
+            raw_mel_padded[i, :, :raw_mel.size(1)] = raw_mel
         raw_text = [x[5] for x in batch]
         audiopath = [x[6] for x in batch]
+        # print(raw_text)
+        # print(audiopath)
+        # print(torch.max(spec_padded),torch.min(spec_padded),torch.max(wav_padded),torch.min(wav_padded))
         return {
             "spec":spec_padded,
             "spec_length":spec_lengths,
             "raw_spec":raw_spec_padded,
             "raw_spec_length":raw_spec_lengths,
+            "mel":mel_padded,
+            "raw_mel":raw_mel_padded,
             "wav":wav_padded,
             "wav_length":wav_lengths,
             "raw_wav":raw_wav_padded,

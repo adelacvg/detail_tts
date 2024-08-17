@@ -21,7 +21,6 @@ from torch.nn.utils import weight_norm, remove_weight_norm, spectral_norm
 from vqvae.modules.commons import init_weights, get_padding
 from vqvae.modules.quantize import ResidualVectorQuantizer
 
-
 class TextEncoder(nn.Module):
     def __init__(
         self,
@@ -482,8 +481,8 @@ def do_spectrogram_diffusion(diffusion_model, diffuser, latents, conditioning_la
     Uses the specified diffusion model to convert discrete codes into a spectrogram.
     """
     with torch.no_grad():
-        output_seq_len = latents.shape[2] # This diffusion model converts from 22kHz spectrogram codes to a 24kHz spectrogram signal.
-        output_shape = (latents.shape[0], 192, output_seq_len)
+        output_seq_len = latents.shape[2]*4 # This diffusion model converts from 22kHz spectrogram codes to a 24kHz spectrogram signal.
+        output_shape = (latents.shape[0], 128, output_seq_len)
         precomputed_embeddings = diffusion_model.timestep_independent(latents, conditioning_latents, output_seq_len, False)
 
         noise = torch.randn(output_shape, device=latents.device) * temperature
@@ -491,6 +490,22 @@ def do_spectrogram_diffusion(diffusion_model, diffuser, latents, conditioning_la
                                     model_kwargs={'precomputed_aligned_embeddings': precomputed_embeddings},
                                     progress=verbose)
         return mel[:,:,:output_seq_len]
+class Transpose(nn.Module):
+    def __init__(self, dims):
+        super().__init__()
+        assert len(dims) == 2, 'dims must be a tuple of two dimensions'
+        self.dims = dims
+
+    def forward(self, x):
+        return x.transpose(*self.dims)
+MEL_MIN = -11.512925465
+TORCH_MEL_MAX = 5.54517744448
+
+def normalize_torch_mel(mel):
+    return 2 * ((mel - MEL_MIN) / (TORCH_MEL_MAX - MEL_MIN)) - 1
+
+def denormalize_torch_mel(norm_mel):
+    return ((norm_mel+1)/2) * (TORCH_MEL_MAX - MEL_MIN) + MEL_MIN
 class SynthesizerTrn(nn.Module):
     """
     Synthesizer for Training
@@ -556,27 +571,9 @@ class SynthesizerTrn(nn.Module):
             gin_channels=gin_channels,
         )
         
-        # self.enc_p = []
-        # self.enc_p.extend(
-        #     [
-        #         PosteriorEncoder(
-        #             spec_channels, inter_channels, hidden_channels, False,
-        #         5, 1, 16, gin_channels=gin_channels),
-        #         SpecEncoder(
-        #             inter_channels, hidden_channels, filter_channels, False, n_heads,
-        #         n_layers, kernel_size, p_dropout,gin_channels=gin_channels),
-        #         SpecEncoder(
-        #             inter_channels, hidden_channels, filter_channels, False, n_heads,
-        #         n_layers, kernel_size, p_dropout,gin_channels=gin_channels),
-        #         SpecEncoder(
-        #             inter_channels, hidden_channels, filter_channels, False, n_heads,
-        #         n_layers, kernel_size, p_dropout),
-        #         SpecEncoder(
-        #             inter_channels, hidden_channels, filter_channels, True, n_heads,
-        #         n_layers, kernel_size, p_dropout),
-        #     ]
-        # )
-        # self.enc_p = nn.ModuleList(self.enc_p)
+
+        mel_channels = cfg['data']['n_mel_channels']
+        self.mel_channels = mel_channels
         self.diffuser= SpacedDiffusion(use_timesteps=space_timesteps(trained_diffusion_steps, [desired_diffusion_steps]), model_mean_type='epsilon',
                            model_var_type='learned_range', loss_type='mse', betas=get_named_beta_schedule('linear', trained_diffusion_steps),
                            conditioning_free=False, conditioning_free_k=cond_free_k)
@@ -584,10 +581,12 @@ class SynthesizerTrn(nn.Module):
                            model_var_type='learned_range', loss_type='mse', betas=get_named_beta_schedule('linear', trained_diffusion_steps),
                            conditioning_free=True, conditioning_free_k=cond_free_k, sampler='dpm++2m')
         self.diff_ref_enc = modules.MelStyleEncoder(
-            spec_channels, style_vector_dim=gin_channels
+            mel_channels, style_vector_dim=gin_channels
         )
         self.diffusion = DiffusionTts(**cfg['diffusion'])
-        
+        self.in_proj = nn.Conv1d(mel_channels, inter_channels,3,1,1)
+        self.enc_p = SpecEncoder(inter_channels, hidden_channels, filter_channels, True, n_heads,
+                n_layers, kernel_size, p_dropout)
         self.enc_q = PosteriorEncoder(
             spec_channels, inter_channels, hidden_channels, True,
             5, 1, 16, gin_channels=gin_channels)
@@ -595,29 +594,36 @@ class SynthesizerTrn(nn.Module):
             inter_channels, hidden_channels, 5, 1, 4, gin_channels=gin_channels
         )
         self.ref_enc = modules.MelStyleEncoder(
-            spec_channels, style_vector_dim=gin_channels
+            mel_channels, style_vector_dim=gin_channels
         )
-        self.proj = [nn.Conv1d(spec_channels, inter_channels, kernel_size=2, stride=2),
-                    nn.Conv1d(inter_channels, 4*inter_channels, kernel_size=2, stride=2)]
-        self.proj = nn.ModuleList(self.proj)
-        self.proj_out = []
-        self.proj_out.extend([nn.ConvTranspose1d(4*inter_channels, 2*inter_channels, kernel_size=2, stride=2),
-                             nn.ConvTranspose1d(2*inter_channels, inter_channels, kernel_size=2, stride=2)])
-        self.proj_out = nn.ModuleList(self.proj_out)
-        self.sample_proj = nn.Conv1d(inter_channels, 2*inter_channels,1)
-        self.quantizer = ResidualVectorQuantizer(dimension=hidden_channels, n_q=1, bins=1024)
+        self.quantizer = ResidualVectorQuantizer(dimension=inter_channels*4, n_q=1, bins=cfg['vaegan']['vq_bins'])
         self.gpt = UnifiedVoice(**cfg['gpt'])
         self.gpt.post_init_gpt2_config(use_deepspeed=False, kv_cache=False, half=False)
         self.mel_loss_weight = cfg['train']['mel_weight']
         self.text_loss_weight = cfg['train']['text_weight']
         
-        self.vq_enc = nn.Conv1d(hidden_channels,hidden_channels,1)
+        self.vq_enc = nn.Sequential(
+                Transpose((1,2)),
+                nn.LayerNorm(mel_channels),
+                Transpose((1,2)),
+                nn.Conv1d(mel_channels, inter_channels * 2, 3, 2, 1),
+                nn.SiLU(),
+                nn.Conv1d(inter_channels * 2, inter_channels * 4, 3,2,1),
+                nn.SiLU(),
+                nn.Conv1d(inter_channels * 4, inter_channels * 4, 3,1,1),
+            )
         self.vq_dec = nn.Sequential(
-            nn.ConvTranspose1d(hidden_channels, hidden_channels, 3, stride=2, padding=1,output_padding=1),
-            nn.GroupNorm(8,hidden_channels),
-            nn.SiLU(),
-            nn.ConvTranspose1d(hidden_channels, spec_channels, 3, stride=2, padding=1,output_padding=1)
-        )
+                Transpose((1,2)),
+                nn.LayerNorm(inter_channels * 4),
+                Transpose((1,2)),
+                nn.ConvTranspose1d(inter_channels * 4, inter_channels * 2,
+                                   3, 2, padding=1, output_padding=1),
+                nn.SiLU(),
+                nn.ConvTranspose1d(inter_channels * 2, inter_channels,
+                                   3, 2, padding=1, output_padding=1),
+                nn.SiLU(),
+                nn.Conv1d(inter_channels, mel_channels, 3,1,1)
+            )
         self.target = cfg['train']['target']
         if cfg['train']['target']=='vqvae':
             self.requires_grad_(False)
@@ -642,17 +648,9 @@ class SynthesizerTrn(nn.Module):
     def forward_vq(self,y,y_lengths,data):
         assert y.shape[-1]%4==0
         # with profiler.profile(with_stack=True, profile_memory=True) as prof:
-        y_mask = torch.unsqueeze( commons.sequence_mask(y_lengths, y.size(2)), 1).to(y.dtype)
-        quantized_mask = torch.unsqueeze(commons.sequence_mask(y_lengths//4, y.size(2)//4), 1).to(y.dtype)
-        g = self.ref_enc(y * y_mask, y_mask)
+        y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, y.size(2)), 1).to(y.dtype)
 
-        x = self.enc_p[0](y, y_lengths, g=g)
-        x = self.proj[0](x)
-        x = self.enc_p[1](x, y_lengths//2, g=g)
-        x = self.proj[1](x)
-        x = self.enc_p[2](x,y_lengths//4, g=g)
-
-        x_vq = self.vq_enc(x.detach())
+        x_vq = self.vq_enc(y)
         quantized, codes, commit_loss, quantized_list = self.quantizer(x_vq, layers=[0])
         recon = self.vq_dec(quantized)
         recon_loss = nn.L1Loss()(recon, y)
@@ -660,20 +658,20 @@ class SynthesizerTrn(nn.Module):
         return vq_loss
     def forward_diff(self,y,y_lengths,data):
         y_mask = torch.unsqueeze( commons.sequence_mask(y_lengths, y.size(2)), 1).to(y.dtype)
+        # print(torch.max(y),torch.min(y))
+        x_start = normalize_torch_mel(y)
         with torch.no_grad():
-            code, x_start = self.encode(data['raw_spec'], data['raw_spec_length'])
+            code, _ = self.encode(data['raw_mel'], data['raw_spec_length'])
         t = torch.randint(0, self.desired_diffusion_steps, (x_start.shape[0],), device=y.device).long().to(y.device)
         with torch.no_grad():
             aligned_conditioning = self.gpt(
-                data['raw_spec'], data['raw_spec_length'],
+                data['raw_mel'], data['raw_spec_length'],
                 data['text'], data['text_length'],
                 code, data['raw_wav_length'],
                 return_latent=True, clip_inputs=False).transpose(1,2)
         g_diff = self.diff_ref_enc(y * y_mask, y_mask)
         conditioning_latent = g_diff
-        x_start = x_start * 0.18215
-
-        l_diff = self.diffuser.training_losses( 
+        l_diff = self.diffuser.training_losses(
             model = self.diffusion, 
             x_start = x_start,
             t = t,
@@ -685,8 +683,8 @@ class SynthesizerTrn(nn.Module):
         return l_diff
     def forward_gpt(self,y,y_lengths,data):
         with torch.no_grad():
-            code, x_start = self.encode(data['raw_spec'], data['raw_spec_length'])
-        input_params = [data['raw_spec'], data['raw_spec_length'],
+            code, x_start = self.encode(data['raw_mel'], data['raw_spec_length'])
+        input_params = [data['raw_mel'], data['raw_spec_length'],
             data['text'], data['text_length'], code, data['raw_wav_length']]
         loss_text, loss_mel, mel_logits = self.gpt(*input_params)
         loss_gpt = loss_text*self.text_loss_weight + loss_mel*self.mel_loss_weight
@@ -696,24 +694,14 @@ class SynthesizerTrn(nn.Module):
         assert y.shape[-1]%4==0
         # with profiler.profile(with_stack=True, profile_memory=True) as prof:
         y_mask = torch.unsqueeze( commons.sequence_mask(y_lengths, y.size(2)), 1).to(y.dtype)
-        quantized_mask = torch.unsqueeze(commons.sequence_mask(y_lengths//4, y.size(2)//4), 1).to(y.dtype)
+        # print(y.shape)
         g = self.ref_enc(y * y_mask, y_mask)
-
-        # x = self.enc_p[0](y, y_lengths, g=g)
-        x = self.proj[0](y)
-        # x = self.enc_p[1](x, y_lengths//2, g=g)
-        x = self.proj[1](x)
-        # x = self.enc_p[2](x,y_lengths//4, g=g)
-
-        x = self.proj_out[0](x)
-        # x = self.enc_p[3](x,y_lengths//2)
-        x = self.proj_out[1](x)
-        stats = self.sample_proj(x) * y_mask
-        m_p, logs_p = torch.split(stats, self.inter_channels, dim=1)
-        # x, m_p, logs_p = self.enc_p[4](x,y_lengths)
+        
+        x = self.in_proj(y)
+        x, m_p, logs_p = self.enc_p(x,y_lengths)
         quantized = x
 
-        z, m_q, logs_q = self.enc_q(y, y_lengths,g)
+        z, m_q, logs_q = self.enc_q(data['spec'], y_lengths,g)
         assert m_p.shape[-1]==m_q.shape[-1]
         z_p = self.flow(z, y_mask, g=g)
 
@@ -746,67 +734,19 @@ class SynthesizerTrn(nn.Module):
         else:
             return self.forward_all(y,y_lengths,data)
     def forward_all(self, y, y_lengths, data):
-        assert y.shape[-1]%4==0
-        # with profiler.profile(with_stack=True, profile_memory=True) as prof:
-        y_mask = torch.unsqueeze( commons.sequence_mask(y_lengths, y.size(2)), 1).to(y.dtype)
-        quantized_mask = torch.unsqueeze(commons.sequence_mask(y_lengths//4, y.size(2)//4), 1).to(y.dtype)
-        g = self.ref_enc(y * y_mask, y_mask)
-
-        x = self.enc_p[0](y, y_lengths, g=g)
-        x = self.proj[0](x)
-        x = self.enc_p[1](x, y_lengths//2, g=g)
-        x = self.proj[1](x)
-        x = self.enc_p[2](x,y_lengths//4, g=g)
-        l_diff=0
-        commit_loss=0
-        x_vq = self.vq_enc(x.detach())
-        quantized, codes, commit_loss, quantized_list = self.quantizer(x_vq, layers=[0])
-        recon = self.vq_dec(quantized)
-        recon_loss = nn.L1Loss()(recon, y)
-        vq_loss = commit_loss + recon_loss
-        # quantized, codes, commit_loss, quantized_list = self.quantizer(x.detach(), layers=[0])
-
-        with torch.no_grad():
-            code, x_start = self.encode(data['raw_spec'], data['raw_spec_length'])
-        input_params = [data['raw_spec'], data['raw_spec_length'],
-            data['text'], data['text_length'], code, data['raw_wav_length']]
-        loss_text, loss_mel, mel_logits = self.gpt(*input_params)
-        loss_gpt = loss_text*self.text_loss_weight + loss_mel*self.mel_loss_weight
-
-        t = torch.randint(0, self.desired_diffusion_steps, (x_start.shape[0],), device=x.device).long().to(x.device)
-        with torch.no_grad():
-            aligned_conditioning = self.gpt(
-                data['raw_spec'], data['raw_spec_length'],
-                data['text'], data['text_length'],
-                code, data['raw_wav_length'],
-                return_latent=True, clip_inputs=False).transpose(1,2)
-        g_diff = self.diff_ref_enc(y * y_mask, y_mask)
-        conditioning_latent = g_diff
-        x_start = x_start * 0.18215
-        l_diff = self.diffuser.training_losses( 
-            model = self.diffusion, 
-            x_start = x_start,
-            t = t,
-            model_kwargs = {
-                "aligned_conditioning": aligned_conditioning,
-                "conditioning_latent": conditioning_latent
-            },
-            )["loss"].mean()
-
-        x = self.proj_out[0](x)
-        x = self.enc_p[3](x,y_lengths//2)
-        x = self.proj_out[1](x)
-        x, m_p, logs_p = self.enc_p[4](x,y_lengths)
-        quantized = x
-
-        z, m_q, logs_q = self.enc_q(y, y_lengths,g)
-        assert m_p.shape[-1]==m_q.shape[-1]
-        z_p = self.flow(z, y_mask, g=g)
-
-        z_slice, ids_slice = commons.rand_slice_segments(
-            z, y_lengths, self.segment_size
-        )
-        o = self.dec(z_slice, g=g)
+        (
+            o,
+            l_diff,
+            loss_gpt,
+            vq_loss,
+            ids_slice,
+            y_mask,
+            (z, z_p, m_p, logs_p, m_q, logs_q),
+            quantized,
+        )  = self.forward_flowvae(y,y_lengths,data)
+        l_diff = self.forward_diff(y_y_lengths,data)
+        loss_gpt = self.forward_gpt(y,y_lengths,data)
+        vq_loss = self.forward_vq(y,y_lengths,data)
         return (
             o,
             l_diff,
@@ -819,6 +759,10 @@ class SynthesizerTrn(nn.Module):
         )
 
     def infer(self, text, text_length, refer, refer_lengths, noise_scale=0.667):
+        text = text[0].unsqueeze(0)
+        text_length = text_length[0].unsqueeze(0)
+        refer = refer[0].unsqueeze(0)
+        refer_lengths = refer_lengths[0].unsqueeze(0)
         refer_mask = torch.unsqueeze(
             commons.sequence_mask(refer_lengths, refer.size(2)), 1).to(refer.dtype)
         g = self.ref_enc(refer * refer_mask, refer_mask)
@@ -833,57 +777,83 @@ class SynthesizerTrn(nn.Module):
                     length_penalty=1.0,
                     repetition_penalty=2.0,
                     max_generate_length=600)
+        # print(codes.shape,codes)
+        codes = codes[:,:-1]
         latent = self.gpt(refer, refer_lengths, text,
             text_length, codes,
             torch.tensor([codes.shape[-1]*self.gpt.mel_length_compression], device=text.device),
             return_latent=True, clip_inputs=False).transpose(1,2)
         g_diff = self.diff_ref_enc(refer * refer_mask, refer_mask)
         latent = do_spectrogram_diffusion(self.diffusion, self.infer_diffuser,latent,g_diff,temperature=1.0)
-        latent = latent/0.18215
+        latent = denormalize_torch_mel(latent)
+        y_lengths = torch.LongTensor([latent.shape[-1]]).to(latent.device)
+        y_mask = torch.unsqueeze(
+            commons.sequence_mask(y_lengths, latent.size(2)), 1).to(latent.dtype)
+        o = self.infer_flowvae(latent,y_lengths,None)
+        return  o
+    def infer_gpt(self, text, text_length, refer, refer_lengths, noise_scale=0.667):
+        text = text[0].unsqueeze(0)
+        text_length = text_length[0].unsqueeze(0)
+        refer = refer[0].unsqueeze(0)
+        refer_lengths = refer_lengths[0].unsqueeze(0)
+        refer_mask = torch.unsqueeze(
+            commons.sequence_mask(refer_lengths, refer.size(2)), 1).to(refer.dtype)
+        g = self.ref_enc(refer * refer_mask, refer_mask)
+        codes = self.gpt.inference_speech_tortoise(
+                    refer,
+                    refer_lengths,
+                    text,
+                    do_sample=True,
+                    top_p=0.8,
+                    temperature=0.8,
+                    num_return_sequences=1,
+                    length_penalty=1.0,
+                    repetition_penalty=2.0,
+                    max_generate_length=600)
+        # print(codes)
+        latent = self.quantizer.decode(codes[:,:-1].unsqueeze(0))
+        # print(latent.shape)
+        
+        # print(latent)
+        if latent.shape[-1]==0:
+            latent = torch.zeros(latent.shape[0],latent.shape[1],16).to(latent.device)
+        
         y_lengths = torch.LongTensor([latent.shape[-1]*4]).to(latent.device)
+        # print(codes,latent)
         y_mask = torch.unsqueeze(
             commons.sequence_mask(y_lengths, latent.size(2)*4), 1).to(latent.dtype)
-        x = self.proj_out[0](latent)
-        x = self.enc_p[3](x,y_lengths//2)
-        x = self.proj_out[1](x)
-        x, m_p, logs_p = self.enc_p[4](x,y_lengths)
-        z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
-        z = self.flow(z_p, y_mask, g=g, reverse=True)
-        o = self.dec(z, g=g)
+        recon = self.vq_dec(latent)
+        # print(recon.shape, y_lengths)
+        o = self.infer_flowvae(recon,y_lengths,None)
         return  o
     def infer_flowvae(self, y, y_lengths,data,noise_scale=0.667):
+        y = y[0].unsqueeze(0)
+        y_lengths = y_lengths[0].unsqueeze(0)
         assert y.shape[-1]%4==0
         # with profiler.profile(with_stack=True, profile_memory=True) as prof:
         y_mask = torch.unsqueeze( commons.sequence_mask(y_lengths, y.size(2)), 1).to(y.dtype)
         quantized_mask = torch.unsqueeze(commons.sequence_mask(y_lengths//4, y.size(2)//4), 1).to(y.dtype)
         g = self.ref_enc(y * y_mask, y_mask)
-
-        # x = self.enc_p[0](y, y_lengths, g=g)
-        x = self.proj[0](y)
-        # x = self.enc_p[1](x, y_lengths//2, g=g)
-        x = self.proj[1](x)
-        # x = self.enc_p[2](x,y_lengths//4, g=g)
-
-        x = self.proj_out[0](x)
-        # x = self.enc_p[3](x,y_lengths//2)
-        x = self.proj_out[1](x)
-        stats = self.sample_proj(x) * y_mask
-        m_p, logs_p = torch.split(stats, self.inter_channels, dim=1)
+        x = self.in_proj(y)
+        x, m_p, logs_p = self.enc_p(x,y_lengths)
+        
         # x, m_p, logs_p = self.enc_p[4](x,y_lengths)
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
         z = self.flow(z_p, y_mask, g=g, reverse=True)
         o = self.dec(z, g=g)
         return o
+    def infer_vqvae(self,y):
+        y = y[0].unsqueeze(0)
+        assert y.shape[-1]%4==0
+        x = self.vq_enc(y)
+        quantized, codes, commit_loss, quantized_list = self.quantizer(x, layers=[0])
+        recon = self.vq_dec(quantized)
+        y_lengths = torch.LongTensor([y.shape[-1]]).to(y.device)
+        o = self.infer_flowvae(recon,y_lengths,None)
+        return  recon,o
     def encode(self, y, y_lengths):
-        y_mask = torch.unsqueeze( commons.sequence_mask(y_lengths, y.size(2)), 1).to(y.dtype)
-        g = self.ref_enc(y * y_mask, y_mask)
-        # x = self.enc_p[0](y, y_lengths, g=g)
-        x = self.proj[0](x)
-        # x = self.enc_p[1](x, y_lengths//2, g=g)
-        x = self.proj[1](x)
-        # x = self.enc_p[2](x,y_lengths//4, g=g)
-        x_vq = self.vq_enc(x.detach())
+        x_vq = self.vq_enc(y)
         quantized, codes, commit_loss, quantized_list = self.quantizer(x_vq, layers=[0])
-        return codes[0].detach(), x.detach()
+        return codes[0].detach(), x_vq.detach()
    
         

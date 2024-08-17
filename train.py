@@ -29,6 +29,8 @@ import torchaudio
 from vqvae.modules.losses import generator_loss, discriminator_loss, feature_loss, kl_loss
 from torchaudio.functional import phase_vocoder, resample, spectrogram
 from torchaudio import transforms
+from datetime import timedelta
+from accelerate import InitProcessGroupKwargs
 
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = False
@@ -80,7 +82,9 @@ class Trainer(object):
 
         # ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         # self.accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
-        self.accelerator = Accelerator()
+        # Create the custom configuration
+        process_group_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=5400))  # 1.5 hours
+        self.accelerator = Accelerator(kwargs_handlers=[process_group_kwargs])
         self.cfg = json.load(open(cfg_path))
         hps = HParams(**self.cfg)
         self.hps = hps
@@ -157,6 +161,8 @@ class Trainer(object):
         current_model_dict = G.state_dict()
         G_state_dict={k:v if v.size()==current_model_dict[k].size()
             # and 'diff' not in k
+            # and 'gpt' not in k
+            # and 'vq' not in k
             else  current_model_dict[k] for k,v in zip(current_model_dict.keys(), G_state_dict.values())}
         G.load_state_dict(G_state_dict, strict=False)
         D = accelerator.unwrap_model(self.D)
@@ -165,6 +171,7 @@ class Trainer(object):
         try:
             G_opt.load_state_dict(G_opt_state_dict)
         except:
+            # G.quantizer.layers[0]._codebook.inited=torch.Tensor([True])
             print('Fail to load G_opt')
         D_opt = accelerator.unwrap_model(self.D_optimizer)
         D_opt.load_state_dict(D_opt_state_dict)
@@ -205,7 +212,7 @@ class Trainer(object):
                             data[d] = data[d].to(device)
                         spec, y, spec_length, wav = data['spec'],data['wav'],data['spec_length'],data['raw_wav']
                         with self.accelerator.autocast():
-                            loss = self.G(spec, spec_length,data=data)
+                            loss = self.G(data['mel'], spec_length,data=data)
                             loss = loss / self.gradient_accumulate_every
                             total_loss += loss.item()
                         self.accelerator.backward(loss)
@@ -216,14 +223,36 @@ class Trainer(object):
                     self.G_optimizer.step()
                     self.G_optimizer.zero_grad()
                     accelerator.wait_for_everyone()
-                    if accelerator.is_main_process and self.step % self.val_freq == 0 and self.hps.train.target == 'diff':
+                    if accelerator.is_main_process and self.step % self.val_freq == 0 and self.hps.train.target in ['diff','gpt']:
                         eval_model = self.accelerator.unwrap_model(self.G)
                         eval_model.eval()
                         with torch.no_grad():
-                            wav_eval = eval_model.infer(data['text'], data['text_length'], spec, spec_length)
+                            if self.hps.train.target == 'diff':
+                                wav_eval = eval_model.infer(data['text'], data['text_length'], data['mel'], spec_length)
+                            if self.hps.train.target == 'gpt':
+                                wav_eval = eval_model.infer_gpt(data['text'], data['text_length'], data['mel'], spec_length)
                         eval_model.train()
                         milestone = self.step // self.cfg['train']['save_freq'] 
                         torchaudio.save(str(self.logs_folder / f'sample-{milestone}.wav'), wav_eval[0].detach().cpu(), hps.data.sampling_rate)
+                        torchaudio.save(str(self.logs_folder / f'gt-{milestone}.wav'), wav[0].detach().cpu(), hps.data.sampling_rate)
+                    if accelerator.is_main_process and self.step % self.val_freq == 0 and self.hps.train.target == 'vqvae':
+                        eval_model = self.accelerator.unwrap_model(self.G)
+                        eval_model.eval()
+                        with torch.no_grad():
+                            mel_recon,wav_recon = eval_model.infer_vqvae(data['raw_mel'])
+                        eval_model.train()
+                        image_dict = {
+                            "img/mel_raw": plot_spectrogram_to_numpy(data['raw_mel'][0, :, :].detach().unsqueeze(-1).cpu().numpy()),
+                            "img/mel_pred": plot_spectrogram_to_numpy(mel_recon[0, :, :].detach().unsqueeze(-1).cpu().numpy()),
+                        }
+                        summarize(
+                            writer=writer,
+                            global_step=self.step,
+                            images=image_dict
+                        )
+                        milestone = self.step // self.cfg['train']['save_freq'] 
+                        torchaudio.save(str(self.logs_folder / f'sample-{milestone}.wav'), wav_recon[0].detach().cpu(), hps.data.sampling_rate)
+                        torchaudio.save(str(self.logs_folder / f'gt-{milestone}.wav'), wav[0].detach().cpu(), hps.data.sampling_rate)
                 elif self.hps.train.target=='flowvae':
                     data = next(self.dataloader)
                     for d in data:
@@ -232,7 +261,7 @@ class Trainer(object):
                     with self.accelerator.autocast():
                         y_hat, diff_loss, loss_gpt, commit_loss, ids_slice, z_mask,\
                         (z, z_p, m_p, logs_p, m_q, logs_q),\
-                        latent = self.G(spec, spec_length,data=data)
+                        latent = self.G(data['mel'], spec_length,data=data)
                         mel = spec_to_mel_torch(
                             spec,
                             hps.data.filter_length,
@@ -293,7 +322,7 @@ class Trainer(object):
                         eval_model = self.accelerator.unwrap_model(self.G)
                         eval_model.eval()
                         with torch.no_grad():
-                            wav_eval = eval_model.infer_flowvae(data['raw_spec'], data['raw_spec_length'],data=data)
+                            wav_eval = eval_model.infer_flowvae(data['raw_mel'], data['raw_spec_length'],data=data)
                         eval_model.train()
                         milestone = self.step // self.cfg['train']['save_freq']
                         # print(data['raw_spec_length'],data['raw_wav_length'],wav_eval[0].shape[-1])
@@ -420,7 +449,7 @@ class Trainer(object):
                     self.save(self.step//1000)
                 self.step += 1
                 pbar.update(1)
-                if self.step%10000==0:
+                if self.step%50000==0:
                     self.scheduler_g.step()
                     self.scheduler_d.step()
                     epoch = epoch + 1
@@ -429,5 +458,5 @@ class Trainer(object):
 
 if __name__ == '__main__':
     trainer = Trainer(cfg_path='vqvae/configs/config_24k.json')
-    trainer.load('/home/hyc/detail_tts/logs/2024-08-12-16-15-51/model-16.pt')
+    trainer.load('/home/hyc/detail_tts/logs/2024-08-17-01-54-27/model-395.pt')
     trainer.train()

@@ -1,6 +1,6 @@
 {
   "train": {
-    "target":"flowvae",
+    "target":"gpt",
     "ssl": false,
     "val_freq": 100,
     "save_freq": 1000,
@@ -13,8 +13,8 @@
       0.99
     ],
     "eps": 1e-09,
-    "batch_size": 16,
-    "gradient_accumulate_every": 8,
+    "batch_size": 8,
+    "gradient_accumulate_every": 16,
     "fp16_run": false,
     "half_type": "fp16",
     "lr_decay": 0.999875,
@@ -48,8 +48,8 @@
   "diffusion":{
     "model_channels":768,
     "num_layers":10,
-    "in_channels":192, 
-    "out_channels":384,
+    "in_channels":128, 
+    "out_channels":256,
     "in_latent_channels":768, 
     "in_tokens":8193, 
     "dropout":0, 
@@ -73,7 +73,7 @@
     "stop_mel_token":8193,
     "start_text_token":255,
     "train_solo_embeddings":false,
-    "spec_channels":513
+    "spec_channels":128
   },
   "vaegan": {
     "inter_channels": 192,
