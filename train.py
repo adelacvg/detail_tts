@@ -336,7 +336,7 @@ class Trainer(object):
                     with self.accelerator.autocast():
                         y_hat, diff_loss, loss_gpt, commit_loss, ids_slice, z_mask,\
                         (z, z_p, m_p, logs_p, m_q, logs_q),\
-                        latent = self.G(spec, spec_length,data=data)
+                        latent = self.G(data['mel'], spec_length,data=data)
                         mel = spec_to_mel_torch(
                             spec,
                             hps.data.filter_length,
@@ -406,7 +406,7 @@ class Trainer(object):
                         eval_model = self.accelerator.unwrap_model(self.G)
                         eval_model.eval()
                         with torch.no_grad():
-                            wav_eval = eval_model.infer(data['text'], data['text_length'], spec, spec_length)
+                            wav_eval = eval_model.infer(data['text'], data['text_length'], data['mel'], spec_length)
                         eval_model.train()
                         milestone = self.step // self.cfg['train']['save_freq'] 
                         torchaudio.save(str(self.logs_folder / f'sample-{milestone}.wav'), wav_eval[0].detach().cpu(), hps.data.sampling_rate)
@@ -458,5 +458,5 @@ class Trainer(object):
 
 if __name__ == '__main__':
     trainer = Trainer(cfg_path='vqvae/configs/config_24k.json')
-    trainer.load('/home/hyc/detail_tts/logs/2024-08-17-01-54-27/model-395.pt')
+    trainer.load('/home/hyc/detail_tts/logs/2024-08-19-14-46-30/model-474.pt')
     trainer.train()

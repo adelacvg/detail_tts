@@ -624,11 +624,15 @@ class SynthesizerTrn(nn.Module):
                 nn.SiLU(),
                 nn.Conv1d(inter_channels, mel_channels, 3,1,1)
             )
+        self.vq_ref_enc = modules.MelStyleEncoder(
+            mel_channels, style_vector_dim=inter_channels * 4
+        )
         self.target = cfg['train']['target']
         if cfg['train']['target']=='vqvae':
             self.requires_grad_(False)
             self.vq_enc.requires_grad_(True)
             self.vq_dec.requires_grad_(True)
+            self.vq_ref_enc.requires_grad_(True)
         if cfg['train']['target']=='gpt':
             self.requires_grad_(False)
             self.gpt.requires_grad_(True)
@@ -642,6 +646,7 @@ class SynthesizerTrn(nn.Module):
             self.diff_ref_enc.requires_grad_(False)
             self.vq_enc.requires_grad_(False)
             self.vq_dec.requires_grad_(False)
+            self.vq_ref_enc.requires_grad_(False)
         # self.requires_grad_(False)
         # self.gpt.requires_grad_(True)
         # self.diffusion.requires_grad_(True)
@@ -649,9 +654,11 @@ class SynthesizerTrn(nn.Module):
         assert y.shape[-1]%4==0
         # with profiler.profile(with_stack=True, profile_memory=True) as prof:
         y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, y.size(2)), 1).to(y.dtype)
-
+        
         x_vq = self.vq_enc(y)
         quantized, codes, commit_loss, quantized_list = self.quantizer(x_vq, layers=[0])
+        g_vq = self.vq_ref_enc(y * y_mask, y_mask)
+        quantized = quantized + g_vq
         recon = self.vq_dec(quantized)
         recon_loss = nn.L1Loss()(recon, y)
         vq_loss = commit_loss*0.25 + recon_loss
@@ -822,6 +829,8 @@ class SynthesizerTrn(nn.Module):
         # print(codes,latent)
         y_mask = torch.unsqueeze(
             commons.sequence_mask(y_lengths, latent.size(2)*4), 1).to(latent.dtype)
+        g_vq = self.vq_ref_enc(refer * refer_mask, refer_mask)
+        latent = latent + g_vq
         recon = self.vq_dec(latent)
         # print(recon.shape, y_lengths)
         o = self.infer_flowvae(recon,y_lengths,None)
@@ -847,6 +856,10 @@ class SynthesizerTrn(nn.Module):
         assert y.shape[-1]%4==0
         x = self.vq_enc(y)
         quantized, codes, commit_loss, quantized_list = self.quantizer(x, layers=[0])
+        y_lengths = torch.LongTensor([int(y.shape[-1])]).to(y.device)
+        y_mask = torch.unsqueeze( commons.sequence_mask(y_lengths, y.size(2)), 1).to(y.dtype)
+        g_vq = self.vq_ref_enc(y * y_mask, y_mask)
+        quantized = quantized + g_vq
         recon = self.vq_dec(quantized)
         y_lengths = torch.LongTensor([y.shape[-1]]).to(y.device)
         o = self.infer_flowvae(recon,y_lengths,None)
