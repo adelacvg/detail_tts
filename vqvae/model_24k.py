@@ -691,7 +691,7 @@ class SynthesizerTrn(nn.Module):
     def forward_gpt(self,y,y_lengths,data):
         with torch.no_grad():
             code, x_start = self.encode(data['raw_mel'], data['raw_spec_length'])
-        input_params = [data['raw_mel'], data['raw_spec_length'],
+        input_params = [data['mel'], data['spec_length'],
             data['text'], data['text_length'], code, data['raw_wav_length']]
         loss_text, loss_mel, mel_logits = self.gpt(*input_params)
         loss_gpt = loss_text*self.text_loss_weight + loss_mel*self.mel_loss_weight

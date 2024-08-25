@@ -159,9 +159,9 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         raw_spec = spec
         raw_wav = audio_norm
         raw_mel =  mel
-        if spec.shape[1] > 800:
-            start = random.randint(0, spec.shape[1]-800)
-            end = start + 788
+        if spec.shape[1] > 500:
+            start = random.randint(0, spec.shape[1]-500)
+            end = start + 496
             spec = spec[:, start:end]
             mel = mel[:, start:end]
             audio_norm = audio_norm[:, start * self.hop_length : end * self.hop_length]
