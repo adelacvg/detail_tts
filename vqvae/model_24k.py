@@ -751,7 +751,7 @@ class SynthesizerTrn(nn.Module):
             (z, z_p, m_p, logs_p, m_q, logs_q),
             quantized,
         )  = self.forward_flowvae(y,y_lengths,data)
-        l_diff = self.forward_diff(y_y_lengths,data)
+        l_diff = self.forward_diff(y,y_lengths,data)
         loss_gpt = self.forward_gpt(y,y_lengths,data)
         vq_loss = self.forward_vq(y,y_lengths,data)
         return (
