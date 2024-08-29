@@ -60,6 +60,7 @@ class ResidualVectorQuantizer(nn.Module):
         self.vq = ResidualVectorQuantization(
             dim=self.dimension,
             codebook_size=self.bins,
+            codebook_dim=8,
             num_quantizers=self.n_q,
             decay=self.decay,
             kmeans_init=self.kmeans_init,

@@ -633,6 +633,7 @@ class SynthesizerTrn(nn.Module):
             self.vq_enc.requires_grad_(True)
             self.vq_dec.requires_grad_(True)
             self.vq_ref_enc.requires_grad_(True)
+            self.quantizer.requires_grad_(True)
         if cfg['train']['target']=='gpt':
             self.requires_grad_(False)
             self.gpt.requires_grad_(True)
@@ -647,6 +648,7 @@ class SynthesizerTrn(nn.Module):
             self.vq_enc.requires_grad_(False)
             self.vq_dec.requires_grad_(False)
             self.vq_ref_enc.requires_grad_(False)
+            self.quantizer.requires_grad_(False)
         # self.requires_grad_(False)
         # self.gpt.requires_grad_(True)
         # self.diffusion.requires_grad_(True)
@@ -869,4 +871,4 @@ class SynthesizerTrn(nn.Module):
         quantized, codes, commit_loss, quantized_list = self.quantizer(x_vq, layers=[0])
         return codes[0].detach(), x_vq.detach()
    
-        
+
