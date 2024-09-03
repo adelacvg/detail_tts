@@ -668,7 +668,7 @@ class SynthesizerTrn(nn.Module):
     def forward_diff(self,y,y_lengths,data):
         y_mask = torch.unsqueeze( commons.sequence_mask(y_lengths, y.size(2)), 1).to(y.dtype)
         # print(torch.max(y),torch.min(y))
-        x_start = normalize_torch_mel(y)
+        x_start = normalize_torch_mel(data['raw_mel'])
         with torch.no_grad():
             code, _ = self.encode(data['raw_mel'], data['raw_spec_length'])
         t = torch.randint(0, self.desired_diffusion_steps, (x_start.shape[0],), device=y.device).long().to(y.device)
