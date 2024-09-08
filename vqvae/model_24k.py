@@ -481,7 +481,7 @@ def do_spectrogram_diffusion(diffusion_model, diffuser, latents, conditioning_la
     Uses the specified diffusion model to convert discrete codes into a spectrogram.
     """
     with torch.no_grad():
-        output_seq_len = latents.shape[2]*4 # This diffusion model converts from 22kHz spectrogram codes to a 24kHz spectrogram signal.
+        output_seq_len = latents.shape[1]*4 # This diffusion model converts from 22kHz spectrogram codes to a 24kHz spectrogram signal.
         output_shape = (latents.shape[0], 128, output_seq_len)
         precomputed_embeddings = diffusion_model.timestep_independent(latents, conditioning_latents, output_seq_len, False)
 
@@ -499,7 +499,8 @@ class Transpose(nn.Module):
     def forward(self, x):
         return x.transpose(*self.dims)
 MEL_MIN = -11.512925465
-TORCH_MEL_MAX = 5.54517744448
+# TORCH_MEL_MAX = 5.54517744448
+TORCH_MEL_MAX = 2.7
 
 def normalize_torch_mel(mel):
     return 2 * ((mel - MEL_MIN) / (TORCH_MEL_MAX - MEL_MIN)) - 1
@@ -580,9 +581,9 @@ class SynthesizerTrn(nn.Module):
         self.infer_diffuser = SpacedDiffusion(use_timesteps=space_timesteps(trained_diffusion_steps, [50]), model_mean_type='epsilon',
                            model_var_type='learned_range', loss_type='mse', betas=get_named_beta_schedule('linear', trained_diffusion_steps),
                            conditioning_free=True, conditioning_free_k=cond_free_k, sampler='dpm++2m')
-        self.diff_ref_enc = modules.MelStyleEncoder(
-            mel_channels, style_vector_dim=gin_channels
-        )
+        # self.diff_ref_enc = modules.MelStyleEncoder(
+        #     mel_channels, style_vector_dim=gin_channels
+        # )
         self.diffusion = DiffusionTts(**cfg['diffusion'])
         self.in_proj = nn.Conv1d(mel_channels, inter_channels,3,1,1)
         self.enc_p = SpecEncoder(inter_channels, hidden_channels, filter_channels, True, n_heads,
@@ -640,11 +641,9 @@ class SynthesizerTrn(nn.Module):
         if cfg['train']['target']=='diff':
             self.requires_grad_(False)
             self.diffusion.requires_grad_(True)
-            self.diff_ref_enc.requires_grad_(True)
         if cfg['train']['target']=='flowvae':
             self.gpt.requires_grad_(False)
             self.diffusion.requires_grad_(False)
-            self.diff_ref_enc.requires_grad_(False)
             self.vq_enc.requires_grad_(False)
             self.vq_dec.requires_grad_(False)
             self.vq_ref_enc.requires_grad_(False)
@@ -677,9 +676,14 @@ class SynthesizerTrn(nn.Module):
                 data['raw_mel'], data['raw_spec_length'],
                 data['text'], data['text_length'],
                 code, data['raw_wav_length'],
-                return_latent=True, clip_inputs=False).transpose(1,2)
-        g_diff = self.diff_ref_enc(y * y_mask, y_mask)
-        conditioning_latent = g_diff
+                return_latent=True, clip_inputs=False)
+        # g_diff = self.diff_ref_enc(y * y_mask, y_mask)
+        # g_diff = torch.clamp(g_diff, min=-1., max=1.)
+        # conditioning_latent = g_diff
+        conditioning_latent = self.diffusion.get_conditioning(y)
+        # print("g_diff max:",torch.max(g_diff))
+        # print("x_start max:",torch.max(x_start))
+        # print("gpt_latent max:",torch.max(aligned_conditioning))
         l_diff = self.diffuser.training_losses(
             model = self.diffusion, 
             x_start = x_start,
@@ -787,14 +791,18 @@ class SynthesizerTrn(nn.Module):
                     repetition_penalty=2.0,
                     max_generate_length=600)
         # print(codes.shape,codes)
+        # print(codes)
         codes = codes[:,:-1]
         latent = self.gpt(refer, refer_lengths, text,
             text_length, codes,
             torch.tensor([codes.shape[-1]*self.gpt.mel_length_compression], device=text.device),
-            return_latent=True, clip_inputs=False).transpose(1,2)
-        g_diff = self.diff_ref_enc(refer * refer_mask, refer_mask)
-        latent = do_spectrogram_diffusion(self.diffusion, self.infer_diffuser,latent,g_diff,temperature=1.0)
+            return_latent=True, clip_inputs=False)
+        # print(latent.shape)
+        # g_diff = self.diff_ref_enc(refer * refer_mask, refer_mask)
+        conditioning_latent = self.diffusion.get_conditioning(refer)
+        latent = do_spectrogram_diffusion(self.diffusion, self.infer_diffuser,latent,conditioning_latent,temperature=1.0)
         latent = denormalize_torch_mel(latent)
+        # print(latent.shape)
         y_lengths = torch.LongTensor([latent.shape[-1]]).to(latent.device)
         y_mask = torch.unsqueeze(
             commons.sequence_mask(y_lengths, latent.size(2)), 1).to(latent.dtype)
@@ -871,4 +879,4 @@ class SynthesizerTrn(nn.Module):
         quantized, codes, commit_loss, quantized_list = self.quantizer(x_vq, layers=[0])
         return codes[0].detach(), x_vq.detach()
    
-
+        

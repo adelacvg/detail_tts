@@ -83,8 +83,9 @@ class Trainer(object):
         # ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         # self.accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
         # Create the custom configuration
-        process_group_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=5400))  # 1.5 hours
-        self.accelerator = Accelerator(kwargs_handlers=[process_group_kwargs])
+        # process_group_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=5400))  # 1.5 hours
+        # self.accelerator = Accelerator(kwargs_handlers=[process_group_kwargs])
+        self.accelerator = Accelerator()
         self.cfg = json.load(open(cfg_path))
         hps = HParams(**self.cfg)
         self.hps = hps
@@ -171,8 +172,10 @@ class Trainer(object):
         try:
             G_opt.load_state_dict(G_opt_state_dict)
         except:
-            # G.quantizer.layers[0]._codebook.inited=torch.Tensor([True])
             print('Fail to load G_opt')
+            #not reinitialize codebook
+            # for layer in G.quantizer.vq.layers:
+            #     layer._codebook.inited = torch.Tensor([True]).to(device)
         D_opt = accelerator.unwrap_model(self.D_optimizer)
         D_opt.load_state_dict(D_opt_state_dict)
     def train(self):
@@ -458,5 +461,5 @@ class Trainer(object):
 
 if __name__ == '__main__':
     trainer = Trainer(cfg_path='vqvae/configs/config_24k.json')
-    trainer.load('/home/hyc/detail_tts/logs/2024-08-19-14-46-30/model-474.pt')
+    trainer.load('/home/hyc/detail_tts/logs/2024-09-08-13-34-37/model-231.pt')
     trainer.train()
